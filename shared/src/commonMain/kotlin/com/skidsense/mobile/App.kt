@@ -1,49 +1,40 @@
 package com.skidsense.mobile
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.safeContentPadding
-import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.tooling.preview.Preview
-import org.jetbrains.compose.resources.painterResource
+import androidx.compose.runtime.Composable
+import com.skidsense.mobile.app.SkidSenseApp
+import com.skidsense.mobile.transport.CarrierFactory
+import com.skidsense.mobile.ui.RcTheme
 
-import skidsense_mobile.shared.generated.resources.Res
-import skidsense_mobile.shared.generated.resources.compose_multiplatform
-
+/**
+ * The shared root. Android's activity and iOS's `MainViewController` both call
+ * this with the same three things, so every screen above it is common code.
+ *
+ * TODO(iOS): `IosEnvironment` still needs the Keychain (secrets), a file store
+ * under Application Support, a biometric gate and a QR scanner before this
+ * entry point is usable; see `platform/DevicePlatform.ios.kt`.
+ */
 @Composable
-@Preview
-fun App() {
-    MaterialTheme {
-        var showContent by remember { mutableStateOf(false) }
-        Column(
-            modifier = Modifier
-                .background(MaterialTheme.colorScheme.primaryContainer)
-                .safeContentPadding()
-                .fillMaxSize(),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Button(onClick = { showContent = !showContent }) {
-                Text("点击我！")
-            }
-            AnimatedVisibility(showContent) {
-                val greeting = remember { Greeting().greet() }
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Image(painterResource(Res.drawable.compose_multiplatform), null)
-                    Text("Compose: $greeting")
-                }
-            }
-        }
+fun App(
+    backend: com.skidsense.mobile.api.BackendClient,
+    carriers: CarrierFactory,
+    platform: com.skidsense.mobile.platform.DevicePlatform,
+    biometrics: com.skidsense.mobile.platform.BiometricGate,
+    launchLink: String? = null
+) {
+    RcTheme {
+        SkidSenseApp(
+            backend = backend,
+            carriers = carriers,
+            platform = platform,
+            biometrics = biometrics,
+            launchLink = launchLink
+        )
     }
+}
+
+/** Placeholder shown by the iOS previews until the environment above exists. */
+@Composable
+fun UnavailableApp(message: String) {
+    Text(message)
 }

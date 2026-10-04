@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      A bare platform theme: the UI is Compose, so this only has to be something
+      that draws no action bar and lets the Compose theme own every colour.
+      Theme.AppCompat is required by the androidx.biometric prompt.
+    -->
+    <style name="Theme.SkidSense" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+    </style>
+</resources>

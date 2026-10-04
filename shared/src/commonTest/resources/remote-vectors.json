@@ -1,0 +1,172 @@
+{
+  "protocol": "skidsense-rc/1",
+  "input": {
+    "hostId": "h4Lk2YxQ9mN3pR7sT1vW0a",
+    "hostStaticPriv": "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100",
+    "clientStaticPriv": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+    "clientEphemeralPriv": "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c3636363636363636363636363636363e",
+    "hostEphemeralPriv": "7777777777777777777777777777777788888888888888888888888888888888",
+    "psk": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    "messages": {
+      "c2s": [
+        "{\"t\":\"hello\",\"v\":[1],\"app\":{\"name\":\"verify\",\"version\":\"0\",\"platform\":\"node\"},\"grant\":\"x.y\"}",
+        "{\"t\":\"req\",\"id\":\"q1\",\"m\":\"sessions.list\",\"p\":{}}"
+      ],
+      "s2c": [
+        "{\"t\":\"welcome\",\"v\":1}",
+        "{\"t\":\"res\",\"id\":\"q1\",\"ok\":true,\"r\":[]}"
+      ]
+    },
+    "wrap": {
+      "key": "9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d",
+      "ephemeralPriv": "4242424242424242424242424242424242424242424242424242424242424242",
+      "epoch": 3
+    },
+    "blob": {
+      "key": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "nonce": "0102030405060708090a0b0c",
+      "sessionKey": "claude:7c1e2d4f-0000-4000-8000-000000000000",
+      "epoch": 3,
+      "plaintext": "{\"row\":{\"title\":\"示例\"},\"turns\":[]}"
+    },
+    "grant": {
+      "seed": "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffee0001",
+      "claims": {
+        "typ": "rc-access",
+        "sub": 42,
+        "hst": "h4Lk2YxQ9mN3pR7sT1vW0a",
+        "dev": "d9Zx8Yw7Vu6Ts5Rq4Po3Nm",
+        "dpk": "",
+        "scp": [
+          "sessions",
+          "prompt",
+          "approve"
+        ],
+        "iat": 1790000000,
+        "exp": 1790003600,
+        "jti": "AAECAwQFBgcICQoL"
+      }
+    }
+  },
+  "output": {
+    "hostStaticPub": "h5aMHBZCvQYA9q2Gm4j5LJYj0N_ETwHe_-Icmt09yl8",
+    "clientStaticPub": "YFpyXSpK3-6xop4X7dYhwbdZPujNvESsbEq24vgF0jw",
+    "clientEphemeralPub": "ImY_ABeryohkXt-LOJinBkiVeMU0gmeM2w347eP7zlY",
+    "hostEphemeralPub": "_9DMLK2p8gUl5Ykyb7T4vcuagR0wQWZVdV3qX6Omw0w",
+    "h0Enroll": "wSWMfuBWsJWk-ojUH2LNBGadxtbcc89RgWlc-F-uC1E",
+    "h0Connect": "YV-dhQCSdqkaSsLOinPjEn-VvUcvyR6hqtH0DJvJsxk",
+    "enroll": {
+      "hs1": {
+        "t": "hs1",
+        "v": 1,
+        "mode": "enroll",
+        "host": "h4Lk2YxQ9mN3pR7sT1vW0a",
+        "e": "ImY_ABeryohkXt-LOJinBkiVeMU0gmeM2w347eP7zlY",
+        "s": "5MWE385Kbp8dlvUHL8H1GhV9LGmzahWOFbYrD9m0vJZjvZq_ROqtlz_1YwW7OS40"
+      },
+      "hs2": {
+        "t": "hs2",
+        "e": "_9DMLK2p8gUl5Ykyb7T4vcuagR0wQWZVdV3qX6Omw0w",
+        "c": "vje6iDQS9EqwRPa3B2ijAkoC0Ei_1CYr4iqFECEJDi4"
+      },
+      "c2s": "yRTmBjI_Fowh-vBmfAkEd9QpkBs5hz-MnYGCVt2woow",
+      "s2c": "FS2JsydPoEsZpXioX9QKBkhQJDkHaP9AfK8NJ9Y-74c",
+      "th": "kTwku4m7zrO80WO5jPkiqWdWz6TxrLvnUkr_klJakmY",
+      "framesC2s": [
+        {
+          "t": "d",
+          "n": 0,
+          "c": "-x27p2hiEIEvUbIRq3oJnK11OOZzUYSCGVOcZGQINicn2JamBI2v6_1fCnUzWE47fl2OCwyK6bx-nPvP8JU1-4v3J6sXTLMOSUuV-SZ2IRYDxHiNq8jtyrScrmaV_b-AmXxk7rR7gvlhBBk"
+        },
+        {
+          "t": "d",
+          "n": 1,
+          "c": "zaRBUIveT-FQpf_WUFsQTOpvsbE3NVxLcRWfR8LrX25a3IjQ5wLs9UgIsh7WkaP2n8wSJY3KLrkK_0I8EQroGQ"
+        }
+      ],
+      "framesS2c": [
+        {
+          "t": "d",
+          "n": 0,
+          "c": "s-0xjkHmhtULdvHRKWfK4MpRy_hgH2-Abzu9_xgSXr051lsv_w"
+        },
+        {
+          "t": "d",
+          "n": 1,
+          "c": "vco2zKotAk4N9GW1HDeIGcBPHg3us5yqN0okBig0BUouI4kayQfo3cnVxG0RjkcK0veFqGnB"
+        }
+      ]
+    },
+    "connect": {
+      "hs1": {
+        "t": "hs1",
+        "v": 1,
+        "mode": "connect",
+        "host": "h4Lk2YxQ9mN3pR7sT1vW0a",
+        "e": "ImY_ABeryohkXt-LOJinBkiVeMU0gmeM2w347eP7zlY",
+        "s": "LUnwt0ABj0rwvvy8PVDpPBvzeP5KMoQSnB1bCLhGYJG3UWQQdCQLkMqbuSCBI9di"
+      },
+      "hs2": {
+        "t": "hs2",
+        "e": "_9DMLK2p8gUl5Ykyb7T4vcuagR0wQWZVdV3qX6Omw0w",
+        "c": "T_-JxIZl8_kuY_Jy97l5Kj772c224FRhhIQgOwA2xv0"
+      },
+      "c2s": "xm1sA-7TBjj80T6voDt2ZLtVj0Z7hSW7xj_KNwJZpqE",
+      "s2c": "WuIH3RFo0I6UKTY6M-lhBb3ZZKVxDEDLm1uklIBX1jU",
+      "th": "ZFx0KzDk-FD75SZxNiJd8FB_LE9utu2DE_o_Yu6ZFhU",
+      "framesC2s": [
+        {
+          "t": "d",
+          "n": 0,
+          "c": "C_Y3kw4dwa3WVieCLEqnlGOJfXV0oCwyxxYGjp1TCkQ0QXfXHg6I77SHCoPMVJSL04HwNwHtisTBsFcU31XzMQUPeCWCZsWsZLSVT7bjibEcucESKQD6JHzZmsFAXnTp6c032kLAXP9iGTs"
+        },
+        {
+          "t": "d",
+          "n": 1,
+          "c": "WCFJjQaHRT-8P8aqu3LCrwfoxN8OOCS1oO2d8A7TLEFvUqBuD8pYRZdoiPFjgp1AsK0M5glSeMyYXgG3ozDKsA"
+        }
+      ],
+      "framesS2c": [
+        {
+          "t": "d",
+          "n": 0,
+          "c": "v1A9NImXXuJ5iw95UoY2zxda2amRvsNUTu9_-OU74BHg4cBA6w"
+        },
+        {
+          "t": "d",
+          "n": 1,
+          "c": "C8apXQN6fLbNdjLalUrhWAGWTAAO0l0uUHAgjYGfbHBYTw6NKP1OY7DWcUqh1fcAk6Rru1UM"
+        }
+      ]
+    },
+    "wrap": {
+      "recipientPub": "YFpyXSpK3-6xop4X7dYhwbdZPujNvESsbEq24vgF0jw",
+      "context": "c2tpZHNlbnNlLXJjLzEgaGlzdG9yeS1rZXkAaDRMazJZeFE5bU4zcFI3c1QxdlcwYQAAAAAD",
+      "wrapped": "EyxEK-AQ-9V-cmAzKKp25x_MwVA6riGTJ9FNnJmT9HKQ0Bz3VqFbsNv8uVbyUhkXR7c2D0OFbjsyjLjsZxK9B6K1EDk6c90L41I9M_FVMH8"
+    },
+    "blob": {
+      "aad": "c2tpZHNlbnNlLXJjLzEgaGlzdG9yeQBoNExrMll4UTltTjNwUjdzVDF2VzBhAGNsYXVkZTo3YzFlMmQ0Zi0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDAAAAAAAw",
+      "blob": "AQIDBAUGBwgJCgsMFrPd__694F8YqYLu6C_KOwWa6IEwoJwOJWurc1nIFPa6tf2YQYsYIFWELThM_g3_6bR_yhA"
+    },
+    "grant": {
+      "publicKey": "PZBq-rps57vbXXGftULX_I_dpgJBMfH_5mFpjcRhl2k",
+      "claims": {
+        "typ": "rc-access",
+        "sub": 42,
+        "hst": "h4Lk2YxQ9mN3pR7sT1vW0a",
+        "dev": "d9Zx8Yw7Vu6Ts5Rq4Po3Nm",
+        "dpk": "YFpyXSpK3-6xop4X7dYhwbdZPujNvESsbEq24vgF0jw",
+        "scp": [
+          "sessions",
+          "prompt",
+          "approve"
+        ],
+        "iat": 1790000000,
+        "exp": 1790003600,
+        "jti": "AAECAwQFBgcICQoL"
+      },
+      "token": "eyJ0eXAiOiJyYy1hY2Nlc3MiLCJzdWIiOjQyLCJoc3QiOiJoNExrMll4UTltTjNwUjdzVDF2VzBhIiwiZGV2IjoiZDlaeDhZdzdWdTZUczVScTRQbzNObSIsImRwayI6IllGcHlYU3BLMy02eG9wNFg3ZFlod2JkWlB1ak52RVNzYkVxMjR2Z0YwanciLCJzY3AiOlsic2Vzc2lvbnMiLCJwcm9tcHQiLCJhcHByb3ZlIl0sImlhdCI6MTc5MDAwMDAwMCwiZXhwIjoxNzkwMDAzNjAwLCJqdGkiOiJBQUVDQXdRRkJnY0lDUW9MIn0.bmB_fOAkauq13slKz5jsO1o2JfeigghuUr9skPQd7E0_G9xnSdrOFq30165hYU5gDImk2Z-779n61Z8n9_gVBA"
+    },
+    "fingerprint": "D511-0BBB-BA1D-667B"
+  }
+}
