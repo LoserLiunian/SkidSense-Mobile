@@ -350,4 +350,46 @@ class ClientTest {
             Enrollment.enroll(payload, "dev-1", identity, "ticket-2", FakeCarriers(backgroundScope).apply { lan = { host } }, backgroundScope, fastConfig)
         }
     }
+
+    /**
+     * The 409 recovery (spec §9): the phone is already registered, the backend
+     * issued no ticket, and the way back in is a grant plus an ordinary
+     * `connect` handshake — not another registration, which would earn the same
+     * 409, and not the pairing code, which the host has already spent.
+     */
+    @Test
+    fun existingDeviceReconnectsWithAGrantInsteadOfATicket() = runTest {
+        val host = backgroundScope.host().apply {
+            // No pairing code at all: a connect handshake must not need one.
+            pairingCode = null
+            acceptGrant = { it == "grant-1" }
+            acceptTicket = { false }
+        }
+        val link = Protocol.PAIRING_URL_PREFIX + B64u.encode(utf8(
+            """{"v":1,"n":"$hostId","k":"${B64u.encode(hostStatic.pub)}","c":"${B64u.encode(Primitives.randomBytes(32))}","h":["192.168.1.20"],"p":47290,"s":"https://ai.surise.cn","m":"书房的 Mac"}"""
+        ))
+        val payload = Pairing.decode(link)
+        val welcome = Enrollment.connectWithGrant(
+            payload, "dev-1", identity, "grant-1",
+            FakeCarriers(backgroundScope).apply { lan = { host } }, backgroundScope, fastConfig
+        )
+        assertEquals(hostId, welcome.host.id)
+        assertEquals(listOf<String?>("grant-1"), host.helloGrants)
+        // A reconnect enrols nothing: the host already has this key.
+        assertTrue(host.enrolledKeys.isEmpty())
+
+        // The grant is what the host checks, so a wrong one must not get in.
+        assertFailsWith<RcConnection.HelloRefused> {
+            Enrollment.connectWithGrant(
+                payload, "dev-1", identity, "grant-2",
+                FakeCarriers(backgroundScope).apply { lan = { host } }, backgroundScope, fastConfig
+            )
+        }
+
+        // And the enroll path must not be reachable with a null ticket: the
+        // two are separate functions precisely so this cannot be called wrong.
+        assertFailsWith<Throwable> {
+            Enrollment.enroll(payload, "dev-1", identity, "", FakeCarriers(backgroundScope).apply { lan = { host } }, backgroundScope, fastConfig)
+        }
+    }
 }

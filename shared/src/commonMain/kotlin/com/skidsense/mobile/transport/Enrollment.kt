@@ -29,6 +29,73 @@ object Enrollment {
         scope: CoroutineScope,
         config: ClientConfig = ClientConfig(),
         onProgress: (String) -> Unit = {}
+    ): Welcome = reach(
+        payload = payload,
+        deviceId = deviceId,
+        identity = identity,
+        ticket = ticket,
+        carriers = carriers,
+        scope = scope,
+        mode = HandshakeMode.ENROLL,
+        psk = payload.code,
+        modeLabel = "正在与电脑握手",
+        config = config,
+        onProgress = onProgress
+    )
+
+    /**
+     * The 409 recovery (spec §9): the phone is already paired to this host with
+     * a key the backend still lists as active, so `POST /devices` refused with
+     * the existing device id and no ticket. Fetch an `rc-access` grant for it
+     * and run an ordinary `connect` handshake — the same skeleton as `enroll`,
+     * with the grant in `hello` instead of a ticket and the pairing code
+     * replaced by nothing.
+     *
+     * Its own function rather than a branch inside `enroll` because the two
+     * differ in exactly these arguments and agree in everything expensive:
+     * route order, per-route timeouts, and which failures are worth retrying
+     * elsewhere. A caller that has a ticket must never reach this path, and a
+     * caller that has none must never take the PSK one — keeping them apart is
+     * what makes that checkable.
+     */
+    suspend fun connectWithGrant(
+        payload: PairingPayload,
+        deviceId: String,
+        identity: KeyPair,
+        /** An `rc-access` grant, resolved by the caller (it may need refreshing). */
+        grant: String,
+        carriers: CarrierFactory,
+        scope: CoroutineScope,
+        config: ClientConfig = ClientConfig(),
+        onProgress: (String) -> Unit = {}
+    ): Welcome = reach(
+        payload = payload,
+        deviceId = deviceId,
+        identity = identity,
+        grant = grant,
+        carriers = carriers,
+        scope = scope,
+        mode = HandshakeMode.CONNECT,
+        psk = null,
+        modeLabel = "正在重新连接这台电脑",
+        config = config,
+        onProgress = onProgress
+    )
+
+    private suspend fun reach(
+        payload: PairingPayload,
+        deviceId: String,
+        identity: KeyPair,
+        /** `connect` carries one of these and `enroll` the other; never both. */
+        grant: String? = null,
+        ticket: String? = null,
+        carriers: CarrierFactory,
+        scope: CoroutineScope,
+        mode: HandshakeMode,
+        psk: ByteArray?,
+        modeLabel: String,
+        config: ClientConfig,
+        onProgress: (String) -> Unit
     ): Welcome {
         val endpoint = HostEndpoint(payload.hostId, payload.hostKey, deviceId, payload.lanAddrs, payload.lanPort)
         var lastError: Throwable = RcException("no-route", "没有可用的连接方式")
@@ -52,10 +119,10 @@ object Enrollment {
                 continue
             }
             try {
-                val initiator = Initiator(HandshakeMode.ENROLL, payload.hostId, payload.hostKey, identity, payload.code)
-                val connection = RcConnection.establish(carrier, route, initiator, null, ticket, config.connection, scope)
+                val initiator = Initiator(mode, payload.hostId, payload.hostKey, identity, psk)
+                val connection = RcConnection.establish(carrier, route, initiator, grant, ticket, config.connection, scope)
                 val welcome = connection.welcome
-                connection.close("enrolled")
+                connection.close(modeLabel)
                 return welcome
             } catch (error: CancellationException) {
                 throw error

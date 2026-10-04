@@ -369,14 +369,61 @@ class AppController(
         val registration = try {
             backend.registerDevice(payload.hostId, deviceName, devicePublicKey, platformName)
         } catch (error: BackendException) {
-            // 409 means this key is already active on that host: reuse that row.
+            // 409 means this key is already active on that host, so the row is
+            // reused — and per spec §9 that response carries the device id but
+            // **no ticket**, because there is nothing left to enrol. Recovery
+            // is two steps, not one: fetch an rc-access grant for that id, then
+            // run an ordinary `connect` handshake. Jumping straight to the
+            // handshake would have nothing to put in `hello`, and retrying the
+            // registration would only earn the same 409.
             val existing = (error.data as? JsonObject)?.let { data ->
-                (data["device_id"] as? JsonPrimitive)?.content
+                (data["device_id"] as? JsonPrimitive)?.content?.takeIf { it.isNotBlank() }
             } ?: throw error
-            onProgress("这台手机已经登记过，继续配对…")
-            return finishPairing(payload, existing, onProgress)
+            onProgress("这台手机已经登记过，正在重新连接…")
+            return reconnectExisting(payload, existing, onProgress)
         }
         return finishPairing(payload, registration.device.deviceId, onProgress, registration.ticket)
+    }
+
+    /**
+     * The 409 path: this phone is already registered on that host with a key
+     * the backend still lists as active, so no ticket was issued.
+     *
+     * Fetch a grant first, then `connect`. The grant is fetched directly rather
+     * than through `GrantCache` because that cache is keyed on the *active*
+     * host, and at this moment this host is not active yet — using it would
+     * throw "还没有选择电脑" from the wrong place.
+     */
+    private suspend fun reconnectExisting(
+        payload: PairingPayload,
+        deviceId: String,
+        onProgress: (String) -> Unit
+    ): PairingPayload {
+        val grant = try {
+            backend.grant(payload.hostId, deviceId).grant
+        } catch (error: BackendException) {
+            throw IllegalStateException(
+                "这台手机在这个电脑上已登记，但拿不到接入凭证：${error.message ?: "未知原因"}。" +
+                    "在电脑上检查它是否已被撤销；已撤销的话请重新生成二维码。",
+                error
+            )
+        }
+        onProgress("正在与电脑握手…")
+        val welcome = try {
+            Enrollment.connectWithGrant(
+                payload = payload,
+                deviceId = deviceId,
+                identity = identity,
+                grant = grant,
+                carriers = carriers,
+                scope = scope,
+                onProgress = onProgress
+            )
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            throw IllegalStateException(error.message ?: "重新连接失败", error)
+        }
+        return rememberPairing(payload, deviceId, welcome, onProgress)
     }
 
     private suspend fun finishPairing(
@@ -401,6 +448,22 @@ class AppController(
             if (error is CancellationException) throw error
             throw IllegalStateException(error.message ?: "配对失败", error)
         }
+        return rememberPairing(payload, deviceId, welcome, onProgress)
+    }
+
+    /**
+     * Record the host after any successful handshake, `enroll` or `connect`.
+     *
+     * One place so the two paths cannot record different fields: the address
+     * list and port come from the QR either way, and a recovery that stored a
+     * host without them would silently fall back to the relay forever.
+     */
+    private suspend fun rememberPairing(
+        payload: PairingPayload,
+        deviceId: String,
+        welcome: com.skidsense.mobile.transport.Welcome,
+        onProgress: (String) -> Unit
+    ): PairingPayload {
         val host = PairedHost(
             hostId = payload.hostId,
             hostKey = B64u.encode(payload.hostKey),
