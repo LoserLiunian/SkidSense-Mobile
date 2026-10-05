@@ -240,7 +240,7 @@ object GeeTestPage {
         </head><body>
         <div id="box"></div>
         <script>
-          function send(value) { window.SKIDSENSE_CAPTCHA(value); }
+          function send(value) { window.SKIDSENSE_CAPTCHA.invoke(value); }
           initGeetest4({ captchaId: '$captchaId', product: 'float' }, function (captcha) {
             captcha.appendTo('#box');
             captcha.onSuccess(function () { send(JSON.stringify(captcha.getValidate())); });
@@ -263,7 +263,7 @@ object TurnstilePage {
         </head><body>
         <div class="cf-turnstile" data-sitekey="$siteKey" data-callback="onToken"></div>
         <script>
-          function onToken(token) { window.SKIDSENSE_CAPTCHA(token); }
+          function onToken(token) { window.SKIDSENSE_CAPTCHA.invoke(token); }
         </script>
         </body></html>
     """.trimIndent()

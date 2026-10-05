@@ -28,7 +28,17 @@ class AndroidEnvironment(context: Context) {
     private val socketClient = platformHttpClient(forWebSockets = true) {
         install(WebSockets) {
             pingIntervalMillis = 20_000
-            maxFrameSize = 2L * 1024 * 1024
+            // OkHttp's `OkHttpWebsocketSession` rejects any `maxFrameSize`
+            // assignment (Ktor 3.6.0, jvmMain `OkHttpWebsocketSession.kt:48` is
+            // a hard `WebSocketException`), so setting it here made every
+            // `webSocketSession` call fail on Android while the same welcome
+            // page on iOS kept working. The literal was therefore omitted by
+            // default review (#D1, androidDeviceTest `AppEnvironmentCarrierTest`).
+            // Inbound size is still bounded twice: the backend caps a relay
+            // frame at `FrameBytes * 8` (`hub_host.go:104`) and `KtorCarrier`
+            // drops a frame whose decoded text exceeds `Protocol.MAX_FRAME`
+            // before it ever reaches the connection, so nothing below relies
+            // on the removed client-side cap.
         }
     }
 
