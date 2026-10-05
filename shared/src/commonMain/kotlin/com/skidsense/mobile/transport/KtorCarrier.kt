@@ -38,7 +38,7 @@ class KtorCarrier(
                     when (frame) {
                         is Frame.Text -> {
                             val text = frame.readText()
-                            if (text.length > Protocol.MAX_FRAME) {
+                            if (com.skidsense.mobile.rc.utf8Length(text) > Protocol.MAX_FRAME) {
                                 session.close(CloseReason(CloseReason.Codes.TOO_BIG, "frame too large"))
                                 break
                             }

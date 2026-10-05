@@ -20,6 +20,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,7 +44,7 @@ import kotlinx.coroutines.launch
  */
 @Composable
 fun GitScreen(app: AppController, root: String, onBack: () -> Unit) {
-    val state = app.state.value
+    val state by app.state.collectAsState()
     val scope = rememberCoroutineScope()
     var snapshot by remember(root) { mutableStateOf<GitSnapshot?>(null) }
     var loading by remember { mutableStateOf(true) }

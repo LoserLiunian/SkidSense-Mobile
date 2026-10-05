@@ -14,6 +14,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -53,7 +54,8 @@ fun TerminalScreen(app: AppController, sessionKey: String, onBack: () -> Unit) {
     var cols by remember { mutableStateOf(80) }
     var rows by remember { mutableStateOf(24) }
     val host = remember(sessionKey) { TerminalChannel(sessionKey) }
-    val connected = app.state.value.connected
+    val appState by app.state.collectAsState()
+    val connected = appState.connected
 
     LaunchedEffect(confirmed, connected) {
         if (!confirmed || !connected) return@LaunchedEffect

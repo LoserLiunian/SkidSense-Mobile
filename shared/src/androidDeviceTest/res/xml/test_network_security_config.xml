@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext is permitted, and deliberately so.
+
+  The LAN carrier is `ws://<addr>:<port>/rc/1` (docs/remote-control.md §10.4):
+  the desktop listens on the local network with no TLS, because a self-signed
+  certificate is one the phone has no way to verify — a padlock that means
+  nothing. Confidentiality and integrity come from the protocol itself: the
+  X25519 handshake pins the host's static key from the pairing QR code, and
+  every frame after it is AES-256-GCM sealed and strictly ordered (§4–§5), so
+  nothing on the network can read or alter a byte, and nothing can impersonate
+  the host.
+
+  Scoped to the whole app rather than to named hosts because the LAN address is
+  whatever the user's router hands out, and it changes. The relay carrier is
+  `wss://` and unaffected either way.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

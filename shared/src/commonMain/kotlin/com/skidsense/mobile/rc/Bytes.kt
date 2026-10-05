@@ -42,6 +42,28 @@ internal object B64Std {
 internal fun utf8(text: String): ByteArray = text.encodeToByteArray()
 
 /**
+ * The UTF-8 length of [text], without encoding it. The protocol's limits are
+ * in bytes (spec §5, §6.3); `String.length` counts UTF-16 units, and for the
+ * Chinese text this app carries those differ threefold. A lone surrogate
+ * counts as the three bytes of U+FFFD it would encode to.
+ */
+fun utf8Length(text: String): Long {
+    var total = 0L
+    var index = 0
+    while (index < text.length) {
+        val unit = text[index].code
+        total += when {
+            unit < 0x80 -> 1
+            unit < 0x800 -> 2
+            unit in 0xD800..0xDBFF && index + 1 < text.length && text[index + 1].code in 0xDC00..0xDFFF -> { index += 1; 4 }
+            else -> 3
+        }
+        index += 1
+    }
+    return total
+}
+
+/**
  * Strict UTF-8 decode (spec §5): a lone surrogate or an overlong form is not
  * text the far end sent, so it is refused rather than replaced with U+FFFD.
  */

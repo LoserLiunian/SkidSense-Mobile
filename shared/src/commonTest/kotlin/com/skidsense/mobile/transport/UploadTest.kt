@@ -70,6 +70,23 @@ class UploadTest {
         h.client.stop()
     }
 
+    /**
+     * A prompt the desktop does not accept leaves the uploads there (spec §7),
+     * so the client puts its copies back: a retry names the same ids and sends
+     * none of the bytes again.
+     */
+    @Test
+    fun takenUploadsGoBackWhenThePromptIsRefused() = runTest {
+        val h = setUp()
+        val upload = h.uploads.begin("keep.txt", "text/plain", bytes(10))
+        val taken = h.uploads.take()
+        assertEquals(0, h.uploads.count)
+        h.uploads.restore(taken)
+        assertEquals(listOf(upload.id), h.uploads.takeIds(), "the same id, not a fresh upload")
+        assertEquals(listOf("upload.begin", "upload.chunk"), h.host.calls.map { it.first }, "nothing was sent again")
+        h.client.stop()
+    }
+
     @Test
     fun aLargeFileIsSlicedAtTheChunkLimit() = runTest {
         val h = setUp()

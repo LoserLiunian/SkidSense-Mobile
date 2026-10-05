@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The device-test APK is a different package from the app, so it does not
+  inherit the app's manifest and is refused cleartext by default. The LAN
+  carrier is `ws://` (the app permits it deliberately — see
+  androidApp/src/main/res/xml/network_security_config.xml), so a test that
+  reaches a real desktop over the LAN has to permit it too.
+
+  This mirrors the app's own config for the test process only; it changes
+  nothing about what ships.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <application
+            android:usesCleartextTraffic="true"
+            android:networkSecurityConfig="@xml/test_network_security_config" />
+</manifest>

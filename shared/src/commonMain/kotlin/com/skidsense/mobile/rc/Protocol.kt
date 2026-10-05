@@ -27,6 +27,9 @@ object Protocol {
     /** A response in parts is refused past this. */
     const val MAX_RESPONSE = 64L * 1024 * 1024
 
+    /** Most slices one response may come in (spec §6.3); the host needs well under a thousand for 64 MiB. */
+    const val MAX_RESPONSE_PARTS = 4096
+
     /** Upload chunk size, raw bytes. */
     const val UPLOAD_CHUNK = 384 * 1024
 

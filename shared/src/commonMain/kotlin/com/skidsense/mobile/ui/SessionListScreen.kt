@@ -18,6 +18,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,7 +44,7 @@ fun SessionListScreen(
     onOpenGit: (String) -> Unit,
     onBack: () -> Unit
 ) {
-    val state = app.state.value
+    val state by app.state.collectAsState()
     val scope = rememberCoroutineScope()
     var query by remember { mutableStateOf("") }
 
@@ -131,7 +132,8 @@ fun SessionListScreen(
 
 @Composable
 fun ConnectionLine(app: AppController) {
-    when (val connection = app.state.value.connection) {
+    val appState by app.state.collectAsState()
+    when (val connection = appState.connection) {
         is com.skidsense.mobile.transport.ClientState.Connected ->
             Hint("已连接 · ${connection.route.label}")
         is com.skidsense.mobile.transport.ClientState.Connecting ->
@@ -223,7 +225,7 @@ private fun SessionCard(
 /** Start a session from the phone: pick a workspace and an agent, then say what for. */
 @Composable
 private fun NewSessionCard(app: AppController) {
-    val state = app.state.value
+    val state by app.state.collectAsState()
     val scope = rememberCoroutineScope()
     var workdir by remember(state.workspaces) { mutableStateOf(state.workspaces.firstOrNull()?.path.orEmpty()) }
     var agent by remember { mutableStateOf("claude") }

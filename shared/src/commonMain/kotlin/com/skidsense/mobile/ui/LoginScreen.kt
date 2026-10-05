@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import com.skidsense.mobile.api.LoginChallenge
 import com.skidsense.mobile.api.ServerStatus
 import com.skidsense.mobile.app.AppController
+import com.skidsense.mobile.platform.CAPTCHA_SEND_JS
 import com.skidsense.mobile.platform.CaptchaWebView
 import kotlinx.coroutines.launch
 
@@ -240,17 +241,27 @@ object GeeTestPage {
         </head><body>
         <div id="box"></div>
         <script>
-          function send(value) { window.SKIDSENSE_CAPTCHA.invoke(value); }
-          initGeetest4({ captchaId: '$captchaId', product: 'float' }, function (captcha) {
+          $CAPTCHA_SEND_JS
+          initGeetest4({ captchaId: '${captchaToken(captchaId)}', product: 'float' }, function (captcha) {
             captcha.appendTo('#box');
-            captcha.onSuccess(function () { send(JSON.stringify(captcha.getValidate())); });
-            captcha.onError(function () { send(''); });
-            captcha.onClose(function () { send(''); });
+            captcha.onSuccess(function () { skidsenseSend(JSON.stringify(captcha.getValidate())); });
+            captcha.onError(function () { skidsenseSend(''); });
+            captcha.onClose(function () { skidsenseSend(''); });
           });
         </script>
         </body></html>
     """.trimIndent()
 }
+
+/**
+ * A captcha id or site key as it may appear inside the page: the server's
+ * `/api/status` supplies them, and they were spliced into a script string and
+ * an HTML attribute unescaped. Both providers issue plain alphanumeric
+ * tokens; anything else is dropped, and the widget then fails visibly
+ * instead of running what the server sent.
+ */
+internal fun captchaToken(value: String): String = value.takeIf { Regex("[A-Za-z0-9_-]{1,128}").matches(it) } ?: ""
+
 
 /** Turnstile, same bridge, same contract: the token comes back as a string. */
 object TurnstilePage {
@@ -261,9 +272,10 @@ object TurnstilePage {
         <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
         <style>body{margin:0;font-family:sans-serif}</style>
         </head><body>
-        <div class="cf-turnstile" data-sitekey="$siteKey" data-callback="onToken"></div>
+        <div class="cf-turnstile" data-sitekey="${captchaToken(siteKey)}" data-callback="onToken"></div>
         <script>
-          function onToken(token) { window.SKIDSENSE_CAPTCHA.invoke(token); }
+          $CAPTCHA_SEND_JS
+          function onToken(token) { skidsenseSend(token); }
         </script>
         </body></html>
     """.trimIndent()

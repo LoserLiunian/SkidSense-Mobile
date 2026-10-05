@@ -235,14 +235,21 @@ class RcConnection private constructor(
             val part = (message["part"] as? JsonPrimitive)?.intOrNull
             val data = message.str("d")
             val complete = stateLock.withLock {
+                // The count is checked before it sizes anything: allocating
+                // from it first let one frame with `parts: -1` throw out of
+                // the read loop, and a huge one ask for an array that large.
+                if (partsTotal !in 1..Protocol.MAX_RESPONSE_PARTS) {
+                    failLocked(id, entry, RcException("bad-response", "分片响应格式错误"))
+                    return@withLock null
+                }
                 val buffer = entry.parts ?: arrayOfNulls<String>(partsTotal).also { entry.parts = it }
                 when {
-                    partsTotal <= 0 || buffer.size != partsTotal || part == null || part !in 0 until partsTotal || data == null -> {
+                    buffer.size != partsTotal || part == null || part !in 0 until partsTotal || data == null -> {
                         failLocked(id, entry, RcException("bad-response", "分片响应格式错误"))
                         null
                     }
                     else -> {
-                        entry.bytes += data.length
+                        entry.bytes += com.skidsense.mobile.rc.utf8Length(data)
                         if (entry.bytes > Protocol.MAX_RESPONSE) {
                             failLocked(id, entry, RcException("too-large", "响应超过 64 MiB 上限"))
                             null

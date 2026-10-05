@@ -134,14 +134,20 @@ class UploadManager(
      * The ids for `turn.prompt`, which consumes them. Refuses to hand over an
      * id that is unfinished, and forgets the ones it returns.
      */
-    fun takeIds(): List<String> {
+    fun takeIds(): List<String> = take().map { it.id }
+
+    /**
+     * The uploads for `turn.prompt`, handed over and forgotten; give them back
+     * with [restore] if the turn is not accepted. Refuses while any is unfinished.
+     */
+    fun take(): List<Upload> {
         val unfinished = open.values.filterNot { it.complete }
         if (unfinished.isNotEmpty()) {
             throw RcException("upload-incomplete", "附件「${unfinished.first().name}」还没传完")
         }
-        val ids = open.keys.toList()
+        val taken = open.values.toList()
         open.clear()
-        return ids
+        return taken
     }
 
     /** Put back the ids of a prompt that failed, so they can be sent again. */

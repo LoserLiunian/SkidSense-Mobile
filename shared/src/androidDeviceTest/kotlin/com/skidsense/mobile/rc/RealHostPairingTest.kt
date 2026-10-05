@@ -47,16 +47,21 @@ import org.junit.runner.RunWith
  * base64 variant, an HKDF info string, an ordering of the four DH terms, or a
  * method name that one side spells differently.
  *
- * This test closes that gap. It is driven by `scripts/review-host-harness.ts`
- * in the desktop repo, which brings up a real `Host` + `RemoteManager` + LAN
- * listener, points them at a stand-in backend that signs grants the way new-api
- * does, and prints a real pairing link. The link, the backend address and the
- * account token are handed in as instrumentation arguments:
+ * This test closes that gap. It is driven by `npm run phone-host` in the
+ * desktop repo (`scripts/phone-test-host.ts`), which brings up a real `Host` +
+ * `RemoteManager` + LAN listener — against a stand-in backend, or a real
+ * new-api — and prints a real pairing link. The link, the backend address and
+ * the account token are handed in as instrumentation arguments:
  *
  *   ./gradlew :shared:connectedAndroidDeviceTest \
+ *     -Pandroid.testInstrumentationRunnerArguments.class=com.skidsense.mobile.rc.RealHostPairingTest \
  *     -Pandroid.testInstrumentationRunnerArguments.pairing='skidsense://pair/1?d=…' \
- *     -Pandroid.testInstrumentationRunnerArguments.backend='http://192.168.0.173:60695' \
- *     -Pandroid.testInstrumentationRunnerArguments.token='review-access-token'
+ *     -Pandroid.testInstrumentationRunnerArguments.backend='http://192.168.1.20:<port>' \
+ *     -Pandroid.testInstrumentationRunnerArguments.token='phone-host-access-token'
+ *
+ * `via=relay` (with the host started relay-only against a real backend) runs
+ * the same conversation through new-api's relay; `idle=<seconds>` also sits
+ * idle on the connection and requires it to survive.
  *
  * The test is skipped when the arguments are absent, so it never fails a
  * plain `connectedAndroidDeviceTest` run.
@@ -66,7 +71,7 @@ class RealHostPairingTest {
     private val args = InstrumentationRegistry.getArguments()
     private val link = args.getString("pairing")
     private val backend = args.getString("backend")
-    private val token = args.getString("token") ?: "review-access-token"
+    private val token = args.getString("token") ?: "phone-host-access-token"
     private val workdirName = args.getString("workdir")
     /**
      * `relay` runs the same test with the LAN carrier disallowed, so the only
@@ -76,13 +81,10 @@ class RealHostPairingTest {
     private val viaRelay = args.getString("via") == "relay"
 
     private val client by lazy { platformHttpClient(forWebSockets = false) }
-    // The WebSockets plugin is not installed by `platformHttpClient` itself — the
-    // app installs it in `AndroidEnvironment`, so a test that opens a real
-    // carrier has to as well. NOT the same settings as the app: the app also sets
-    // `maxFrameSize`, which the OkHttp engine rejects on every session, so this
-    // client leaves it out in order to get past the carrier and test the
-    // protocol. `AppEnvironmentCarrierTest` is the one that uses the app's own
-    // client, and it is the one that fails on that setting.
+    // The WebSockets plugin is not installed by `platformHttpClient` itself;
+    // the app installs it in `AndroidEnvironment`, and this mirrors those
+    // settings. `AppEnvironmentCarrierTest` is the one that uses the app's own
+    // client — this test is about the protocol between the two real ends.
     private val socketClient by lazy {
         platformHttpClient(forWebSockets = true) {
             install(WebSockets) {

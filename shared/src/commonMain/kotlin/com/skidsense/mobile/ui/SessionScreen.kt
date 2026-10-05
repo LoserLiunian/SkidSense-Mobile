@@ -22,6 +22,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -58,8 +59,8 @@ fun SessionScreen(
     onOpenGit: (String) -> Unit,
     onOpenTerminal: (String) -> Unit
 ) {
-    val state = app.state.value
-    val revision = app.liveRevision.value
+    val state by app.state.collectAsState()
+    val revision by app.liveRevision.collectAsState()
     val scope = rememberCoroutineScope()
     var opened by remember { mutableStateOf<OpenSessionResponse?>(null) }
     var loading by remember { mutableStateOf(true) }
@@ -340,7 +341,7 @@ private fun Composer(
     agent: String,
     onSent: () -> Unit
 ) {
-    val state = app.state.value
+    val state by app.state.collectAsState()
     val scope = rememberCoroutineScope()
     var text by remember(sessionKey) { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }

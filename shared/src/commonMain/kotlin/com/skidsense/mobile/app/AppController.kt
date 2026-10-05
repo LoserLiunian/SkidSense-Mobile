@@ -421,9 +421,38 @@ class AppController(
             )
         } catch (error: Throwable) {
             if (error is CancellationException) throw error
+            if (error is com.skidsense.mobile.transport.HandshakeRejected && error.code == "unknown-device") {
+                return repairStale(payload, deviceId, onProgress)
+            }
             throw IllegalStateException(error.message ?: "重新连接失败", error)
         }
         return rememberPairing(payload, deviceId, welcome, onProgress)
+    }
+
+    /**
+     * The backend lists this phone as active on that host, and the host has
+     * no record of it — an `activate` that succeeded on the backend while its
+     * answer was lost, or a host whose identity was reset. Retrying `connect`
+     * can never work (spec §4.3 step 5: the host admits only keys it saw pair),
+     * and every new registration earns the same 409.
+     *
+     * The user is holding a fresh QR code, so this does what they would do by
+     * hand: revoke the stale row, register again — a revoked key gets a new
+     * pending row and a ticket (§9) — and enrol with the code in front of them.
+     */
+    private suspend fun repairStale(
+        payload: PairingPayload,
+        staleDeviceId: String,
+        onProgress: (String) -> Unit
+    ): PairingPayload {
+        onProgress("电脑上没有这台手机的记录，正在重新配对…")
+        try {
+            backend.revokeDevice(staleDeviceId)
+        } catch (error: BackendException) {
+            throw IllegalStateException("无法清理这台手机在服务器上的旧记录：${error.message ?: "未知原因"}", error)
+        }
+        val registration = backend.registerDevice(payload.hostId, deviceModel.ifBlank { "我的手机" }, devicePublicKey, platformName)
+        return finishPairing(payload, registration.device.deviceId, onProgress, registration.ticket)
     }
 
     private suspend fun finishPairing(
@@ -719,12 +748,13 @@ class AppController(
         effort: String?,
         approvalMode: String?
     ): PromptResponse {
-        val ids = try {
-            uploads.takeIds()
+        val taken = try {
+            uploads.take()
         } catch (error: Throwable) {
             if (error is CancellationException) throw error
             return PromptResponse(ok = false, error = error.message ?: "附件还没传完")
         }
+        val ids = taken.map { it.id }
         val body = buildJsonObject {
             put("sessionKey", key)
             put("prompt", text)
@@ -733,15 +763,27 @@ class AppController(
             if (!approvalMode.isNullOrBlank()) put("approvalMode", approvalMode)
             if (ids.isNotEmpty()) putJsonArray("uploads") { ids.forEach { add(JsonPrimitive(it)) } }
         }
+        // The desktop lets go of the uploads only once it accepts the turn
+        // (spec §7), so on any other outcome they are still there under the
+        // same ids and go back on the list: a retry sends the prompt again,
+        // not the bytes. This comment used to say so while the code dropped them.
         val response = try {
             requestDecoded("turn.prompt", body, PromptResponse.serializer())
         } catch (error: Throwable) {
-            if (error is CancellationException) throw error
-            // The ids were not consumed (or the turn failed outright); keep the
-            // attachments so a retry does not need them sent again.
+            if (error is CancellationException) {
+                uploads.restore(taken)
+                throw error
+            }
+            uploads.restore(taken)
             return PromptResponse(ok = false, error = error.message ?: "发送失败")
-        } ?: return PromptResponse(ok = false, error = "电脑没有回应")
-        if (!response.ok) update { it.copy(lastError = response.error) }
+        } ?: run {
+            uploads.restore(taken)
+            return PromptResponse(ok = false, error = "电脑没有回应")
+        }
+        if (!response.ok) {
+            uploads.restore(taken)
+            update { it.copy(lastError = response.error) }
+        }
         return response
     }
 

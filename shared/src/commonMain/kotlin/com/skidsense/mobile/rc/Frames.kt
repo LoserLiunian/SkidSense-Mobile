@@ -25,6 +25,10 @@ class FrameSealer(private val key: ByteArray) {
 
     fun seal(plaintext: String): DataFrame {
         val data = utf8(plaintext)
+        // The far end refuses anything larger and closes the connection over
+        // it (spec §5), so it is refused here, where the caller still has a
+        // connection to report the error on.
+        if (data.size > Protocol.MAX_PLAINTEXT) throw CryptoError("too-large", "消息超过单帧上限")
         if (n >= Protocol.MAX_FRAMES_PER_KEY || bytes + data.size > Protocol.MAX_BYTES_PER_KEY) {
             throw CryptoError("rekey", "本次连接的密钥用量已到上限，需要重新连接")
         }
@@ -43,6 +47,7 @@ class FrameSealer(private val key: ByteArray) {
  */
 class FrameOpener(private val key: ByteArray) {
     private var n = 0L
+    private var bytes = 0L
 
     val received: Long get() = n
 
@@ -51,8 +56,19 @@ class FrameOpener(private val key: ByteArray) {
             if (frame.n < n) throw CryptoError("replayed", "重放的帧")
             throw CryptoError("out-of-order", "帧顺序错误")
         }
+        // The per-key limits bind the receiver too (spec §5): a peer that
+        // carried on past them is using a key the protocol calls spent.
+        if (frame.n >= Protocol.MAX_FRAMES_PER_KEY) throw CryptoError("rekey", "对端超过了单个密钥的帧数上限")
         val plaintext = Primitives.open(key, FrameCrypto.nonce(frame.n), FrameCrypto.aad(frame.n), B64u.decode(frame.c))
+        if (plaintext.size > Protocol.MAX_PLAINTEXT) throw CryptoError("too-large", "帧过大")
+        if (bytes + plaintext.size > Protocol.MAX_BYTES_PER_KEY) throw CryptoError("rekey", "对端超过了单个密钥的字节上限")
         n += 1
+        bytes += plaintext.size
         return strictUtf8(plaintext)
+    }
+
+    /** Test seam: start the counter elsewhere, to reach the per-key limit without 2^32 frames. */
+    internal fun startAt(counter: Long) {
+        n = counter
     }
 }

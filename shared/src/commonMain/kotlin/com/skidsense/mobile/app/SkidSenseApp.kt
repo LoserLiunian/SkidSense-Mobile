@@ -3,6 +3,7 @@ package com.skidsense.mobile.app
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,6 +41,14 @@ sealed interface Screen {
 }
 
 /**
+ * Where the app opens once the controller has loaded, when no link asked for
+ * somewhere else. A stored session survives a restart (the secret store keeps
+ * it), so a signed-in user lands on their computers — not on a login form
+ * that has forgotten even which server they use.
+ */
+internal fun landingScreen(state: AppState): Screen = if (state.user != null) Screen.Hosts else Screen.Login
+
+/**
  * The shell: creates the one [AppController], holds the back stack, and routes
  * between screens. Everything else is a screen reading the controller's state.
  */
@@ -67,7 +76,11 @@ fun SkidSenseApp(
     var screen by remember { mutableStateOf<Screen>(Screen.Login) }
     var stack by remember { mutableStateOf<List<Screen>>(emptyList()) }
     var deepLink by remember(launchLink) { mutableStateOf(DeepLink.parse(launchLink)) }
-    val state = controller.state.value
+    // Collected, not read: `.value` subscribes Compose to nothing, so the
+    // effects below keyed on `state.ready` and `state.user` ran once with the
+    // first value and never again — a tapped pairing link waited forever for
+    // a `ready` it could not see, and so did the landing screen.
+    val state by controller.state.collectAsState()
 
     fun go(next: Screen) {
         stack = stack + screen
@@ -81,17 +94,30 @@ fun SkidSenseApp(
 
     LaunchedEffect(Unit) { controller.start() }
 
+    // The first screen is chosen once, when the stored session has been read.
+    // It used to stay on Login whatever was stored: every cold start asked for
+    // the password again, with the server field back at the default.
+    var landed by remember { mutableStateOf(false) }
+    LaunchedEffect(state.ready) {
+        if (!state.ready || landed) return@LaunchedEffect
+        landed = true
+        if (deepLink == null && screen == Screen.Login) screen = landingScreen(state)
+    }
+
     // A tapped pairing link goes straight to the pairing screen, once the
     // controller has loaded (it needs to know which backend we are signed in to).
+    //
+    // Signed out, the link is kept rather than dropped: signing in changes
+    // `state.user`, this runs again, and the pairing screen opens on the link
+    // the user tapped instead of asking for it a second time.
     LaunchedEffect(deepLink, state.ready, state.user) {
-        val payload = deepLink ?: return@LaunchedEffect
-        if (!state.ready) return@LaunchedEffect
+        if (deepLink == null || !state.ready) return@LaunchedEffect
         if (state.user == null) {
             screen = Screen.Login
-        } else {
-            stack = emptyList()
-            screen = Screen.Pairing
+            return@LaunchedEffect
         }
+        stack = emptyList()
+        screen = Screen.Pairing
         deepLink = null
     }
 
@@ -113,7 +139,7 @@ fun SkidSenseApp(
     }
 
     when (val current = screen) {
-        Screen.Login -> LoginScreen(controller) { screen = Screen.Hosts }
+        Screen.Login -> LoginScreen(controller) { if (deepLink == null) screen = Screen.Hosts }
         Screen.Hosts -> HostListScreen(
             app = controller,
             onOpenHost = { hostId ->

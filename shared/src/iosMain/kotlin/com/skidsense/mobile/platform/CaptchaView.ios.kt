@@ -6,8 +6,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 
 /**
- * TODO(iOS): a `WKWebView` with a `WKScriptMessageHandler` named
- * `SKIDSENSE_CAPTCHA` — the same page contract as Android. Until then the
+ * TODO(iOS): a `WKWebView` with a `WKScriptMessageHandler`, plus a user script
+ * that defines `window.SKIDSENSE_CAPTCHA = { invoke: v =>
+ * webkit.messageHandlers.SKIDSENSE_CAPTCHA.postMessage(v) }` — the pages call
+ * [CAPTCHA_SEND_JS], i.e. `.invoke(value)`, on both platforms. Until then the
  * login screen says so rather than pretending a challenge was solved.
  */
 @Composable

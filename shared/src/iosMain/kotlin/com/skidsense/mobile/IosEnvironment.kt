@@ -3,7 +3,6 @@ package com.skidsense.mobile
 import androidx.compose.runtime.Composable
 import com.skidsense.mobile.api.BackendClient
 import com.skidsense.mobile.app.SkidSenseApp
-import com.skidsense.mobile.platform.BiometricGate
 import com.skidsense.mobile.platform.IosDevicePlatform
 import com.skidsense.mobile.platform.platformHttpClient
 import com.skidsense.mobile.transport.KtorCarrierFactory
@@ -55,8 +54,7 @@ class IosEnvironment {
             backend = backend,
             carriers = carriers,
             platform = platform,
-            // TODO(iOS): a real `LAContext` prompt; passing through for now.
-            biometrics = BiometricGate { _, onResult -> onResult(true) }
+            biometrics = com.skidsense.mobile.platform.iosBiometricGate()
         )
     }
 }

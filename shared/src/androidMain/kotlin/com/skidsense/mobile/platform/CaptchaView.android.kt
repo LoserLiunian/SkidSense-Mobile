@@ -17,7 +17,7 @@ import androidx.compose.ui.viewinterop.AndroidView
  *
  * `addJavascriptInterface` is what makes the result readable; the interface is
  * stripped of context so a compromised page finds nothing to call but
- * `SKIDSENSE_CAPTCHA(String)`.
+ * `SKIDSENSE_CAPTCHA.invoke(String)` (see [CAPTCHA_SEND_JS]).
  */
 @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
 @Composable
@@ -34,7 +34,7 @@ actual fun CaptchaWebView(html: String, onResult: (String?) -> Unit, modifier: M
                 settings.allowContentAccess = false
                 settings.javaScriptCanOpenWindowsAutomatically = false
                 webViewClient = WebViewClient()
-                addJavascriptInterface(bridge, "SKIDSENSE_CAPTCHA")
+                addJavascriptInterface(bridge, CAPTCHA_BRIDGE)
                 loadDataWithBaseURL("https://static.geetest.com/", html, "text/html", "utf-8", null)
             }
         },

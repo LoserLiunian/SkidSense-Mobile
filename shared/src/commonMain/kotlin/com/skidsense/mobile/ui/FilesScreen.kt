@@ -24,6 +24,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,7 +50,7 @@ import kotlinx.coroutines.launch
  */
 @Composable
 fun FilesScreen(app: AppController, root: String, onBack: () -> Unit) {
-    val state = app.state.value
+    val state by app.state.collectAsState()
     val scope = rememberCoroutineScope()
     var path by remember(root) { mutableStateOf("") }
     var entries by remember { mutableStateOf<List<DirEntry>>(emptyList()) }
@@ -63,7 +64,7 @@ fun FilesScreen(app: AppController, root: String, onBack: () -> Unit) {
     var query by remember { mutableStateOf("") }
     var regex by remember { mutableStateOf(false) }
     var searchError by remember { mutableStateOf<String?>(null) }
-    val searchState = app.search.value
+    val searchState = app.search.collectAsState().value
 
     // Leaving the screen cancels the search: the desktop keeps streaming
     // progress until it is told otherwise, and nobody would be reading it.

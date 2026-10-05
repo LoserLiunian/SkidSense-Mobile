@@ -18,6 +18,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,7 +43,7 @@ fun HistoryScreen(
     repository: HistoryRepository?,
     onBack: () -> Unit
 ) {
-    val state = app.state.value
+    val state by app.state.collectAsState()
     val scope = rememberCoroutineScope()
     var entries by remember { mutableStateOf<List<HistoryEntry>>(emptyList()) }
     var query by remember { mutableStateOf("") }
@@ -193,7 +194,7 @@ fun SettingsScreen(
     onHistory: () -> Unit,
     onBiometric: () -> Unit
 ) {
-    val state = app.state.value
+    val state by app.state.collectAsState()
     val scope = rememberCoroutineScope()
     var error by remember { mutableStateOf<String?>(null) }
     var confirmingRevoke by remember { mutableStateOf<String?>(null) }
@@ -343,6 +344,12 @@ private fun DeviceCard(
 
             if (editingScopes) {
                 Spacer(Modifier.height(6.dp))
+                // What this edits is the backend's grant. The computer
+                // intersects it with its own cap for the device (spec §8.1
+                // step 6), so ticking something the computer has not allowed —
+                // the terminal, by default — changes nothing, and the box must
+                // not read as if it did.
+                Hint("这里改的是服务器上的授权。实际生效的是它与电脑本地为这台设备设的上限的交集：电脑上没放开的权限，在这里勾上也不会生效。")
                 com.skidsense.mobile.rc.Scopes.ALL.forEach { scopeName ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         androidx.compose.material3.Checkbox(
@@ -352,7 +359,8 @@ private fun DeviceCard(
                             }
                         )
                         Text(
-                            com.skidsense.mobile.rc.Scopes.LABELS[scopeName] ?: scopeName,
+                            (com.skidsense.mobile.rc.Scopes.LABELS[scopeName] ?: scopeName) +
+                                if (scopeName == com.skidsense.mobile.rc.Scopes.TERMINAL) "（还需在电脑上为这台设备放开）" else "",
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
@@ -362,6 +370,7 @@ private fun DeviceCard(
                     enabled = !busy
                 ) { Text("保存权限") }
             } else {
+                Hint("服务器授权：")
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     device.scopes.forEach { scopeName ->
                         Pill(com.skidsense.mobile.rc.Scopes.LABELS[scopeName] ?: scopeName, MaterialTheme.colorScheme.primary)
