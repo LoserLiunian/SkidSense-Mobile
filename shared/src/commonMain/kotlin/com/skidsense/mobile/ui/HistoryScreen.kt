@@ -343,7 +343,7 @@ private fun DeviceCard(
             }
             Spacer(Modifier.height(4.dp))
             Hint("${device.platform} · ${device.deviceId}")
-            device.lastSeenAt?.let { Hint("最后在线：${formatTime(it * 1000)}") }
+            device.lastSeenAt?.takeIf { it > 0 }?.let { Hint("最后在线：${formatAgo(it * 1000)}") }
 
             if (renaming) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -412,12 +412,20 @@ private fun DeviceCard(
     }
 }
 
-fun formatTime(epochMs: Long): String {
-    // No datetime library: the app only ever shows a local-looking clock, and
-    // the numbers come from the host's own clock.
-    val seconds = epochMs / 1000
-    val minutes = (seconds / 60) % 60
-    val hours = (seconds / 3600) % 24
-    val days = seconds / 86400
-    return "${days}天 ${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}"
+/**
+ * How long ago [epochMs] was, as a person says it.
+ *
+ * `last_seen_at` is Unix time, and the old formatter divided it straight into
+ * days — so it printed days since 1970 (「20732天 09:06」). A relative age needs
+ * no datetime library and no time zone, which is why it was attempted that way.
+ */
+fun formatAgo(epochMs: Long, nowMs: Long = kotlin.time.Clock.System.now().toEpochMilliseconds()): String {
+    // A host clock slightly ahead of the phone's is "just now", not the future.
+    val seconds = ((nowMs - epochMs) / 1000).coerceAtLeast(0)
+    return when {
+        seconds < 60 -> "刚刚"
+        seconds < 3_600 -> "${seconds / 60} 分钟前"
+        seconds < 86_400 -> "${seconds / 3_600} 小时前"
+        else -> "${seconds / 86_400} 天前"
+    }
 }

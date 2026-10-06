@@ -58,6 +58,18 @@ class BackendClientTest {
     private fun loginBody(token: String = "tok-1") =
         """{"access_token":"$token","access_expires_at":${Clock.System.now().epochSeconds + 900},"user":{"id":42,"username":"liunian"},"session":{"id":"sess-1"}}"""
 
+    /**
+     * The whole app is Chinese, and new-api picks its message language from
+     * the user's setting or this header — without it, a refusal such as a
+     * revoked device's arrived in English in the middle of a Chinese screen.
+     */
+    @Test
+    fun everyRequestAsksForChineseMessages() = runTest {
+        val (client, recorded) = client { HttpStatusCode.OK to envelopeSuccess("""{"system_name":"x"}""") }
+        runCatching { client.status(base) }
+        assertEquals("zh-CN", recorded.last().headers[HttpHeaders.AcceptLanguage])
+    }
+
     @Test
     fun loginStoresTheTokenCookieAndSession() = runTest {
         val secrets = MemorySecretStore()

@@ -67,7 +67,7 @@ fun HostListScreen(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
         ) { Text("扫描电脑上的二维码配对") }
 
-        ErrorBanner(state.hostsError.orEmpty()) { app.clearError() }
+        ErrorBanner((state.hostsError ?: state.lastError).orEmpty()) { app.clearError() }
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
@@ -86,6 +86,7 @@ fun HostListScreen(
                     PairedHostCard(
                         host = host,
                         online = state.hosts.firstOrNull { it.hostId == host.hostId }?.online,
+                        lanAddrs = state.hosts.firstOrNull { it.hostId == host.hostId }?.lanAddrs ?: host.lanAddrs,
                         onOpen = { onOpenHost(host.hostId) },
                         onForget = { scope.launch { app.forgetHost(host.hostId) } }
                     )
@@ -99,7 +100,7 @@ fun HostListScreen(
                     ItemCard {
                         Column {
                             CardTitle(host.name.ifBlank { host.hostId }) {
-                                Pill(if (host.online) "在线" else "离线", if (host.online) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                                Pill(presenceLabel(host.online, host.lanAddrs)!!, if (host.online) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             Spacer(Modifier.height(6.dp))
                             Hint("${host.platform} · ${host.appVersion} · 配对前需要在电脑上生成二维码")
@@ -127,14 +128,14 @@ fun HostListScreen(
 }
 
 @Composable
-private fun PairedHostCard(host: PairedHost, online: Boolean?, onOpen: () -> Unit, onForget: () -> Unit) {
+private fun PairedHostCard(host: PairedHost, online: Boolean?, lanAddrs: List<String>, onOpen: () -> Unit, onForget: () -> Unit) {
     var confirmForget by remember { mutableStateOf(false) }
     ItemCard(onClick = onOpen) {
         Column {
             CardTitle(host.name.ifBlank { host.machine.ifBlank { host.hostId } }) {
                 when (online) {
                     true -> Pill("在线", MaterialTheme.colorScheme.primary, filled = true)
-                    false -> Pill("离线", MaterialTheme.colorScheme.onSurfaceVariant)
+                    false -> Pill(presenceLabel(false, lanAddrs)!!, MaterialTheme.colorScheme.onSurfaceVariant)
                     null -> Unit
                 }
             }
@@ -145,7 +146,7 @@ private fun PairedHostCard(host: PairedHost, online: Boolean?, onOpen: () -> Uni
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onOpen, modifier = Modifier.weight(1f)) { Text("连接") }
                 if (confirmForget) {
-                    OutlinedButton(onClick = onForget) { Text("确认忘记") }
+                    OutlinedButton(onClick = onForget) { Text("确认忘记并撤销") }
                     TextButton(onClick = { confirmForget = false }) { Text("取消") }
                 } else {
                     TextButton(onClick = { confirmForget = true }) { Text("忘记") }
@@ -153,8 +154,20 @@ private fun PairedHostCard(host: PairedHost, online: Boolean?, onOpen: () -> Uni
             }
             if (confirmForget) {
                 Spacer(Modifier.height(4.dp))
-                Hint("只在这台手机上删除记录；电脑端仍保留这台设备的登记，要彻底撤销请到设置里操作。")
+                Hint("会同时在服务器上撤销这台手机：电脑立即断开它，也不再为它加密历史。之后要重新扫码才能再连。")
             }
         }
     }
+}
+
+/**
+ * The word next to a computer's name. The backend's `online` measures the
+ * relay and nothing else: a computer with only 局域网直连 on is never online
+ * there, and calling it 离线 sent people away from a host they could reach.
+ * So a missing relay is only 离线 when there is no LAN route to try.
+ */
+internal fun presenceLabel(online: Boolean?, lanAddrs: List<String>): String? = when (online) {
+    null -> null
+    true -> "在线"
+    false -> if (lanAddrs.isNotEmpty()) "中继离线" else "离线"
 }

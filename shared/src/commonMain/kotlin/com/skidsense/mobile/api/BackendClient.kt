@@ -114,6 +114,10 @@ class BackendClient(
             http.request(url) {
                 this.method = method
                 header(HttpHeaders.Accept, "application/json")
+                // new-api picks its message language from the user's setting,
+                // then this header, then English — and every screen here is
+                // Chinese, so a refusal must not arrive in English.
+                header(HttpHeaders.AcceptLanguage, "zh-CN")
                 if (bearer != null) header(HttpHeaders.Authorization, "Bearer $bearer")
                 if (cookie != null) header(HttpHeaders.Cookie, cookie)
                 if (sessionId != null) header("X-Auth-Session", sessionId)

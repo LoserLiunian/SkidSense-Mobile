@@ -254,7 +254,7 @@ class AppController(
             val response = try {
                 backend.grant(host.hostId, host.deviceId)
             } catch (error: BackendException) {
-                throw com.skidsense.mobile.transport.RcException("grant", error.message ?: "无法获取授权凭证")
+                throw grantRefusal(error)
             }
             cached = response.grant
             expiresAt = if (response.expiresAt > 1_000_000_000_000L) response.expiresAt else response.expiresAt * 1000
@@ -264,6 +264,16 @@ class AppController(
 
         override suspend fun onUnauthorized() {
             backend.invalidateAccessToken()
+            lock.withLock { cached = null; expiresAt = 0 }
+        }
+
+        /**
+         * The host kicked this device because its scopes changed or it was
+         * revoked (spec §6.5). The cached grant still lists the old scopes for
+         * up to an hour; replaying it on the reconnect brought back exactly
+         * what the kick was meant to change, so the next one is fetched anew.
+         */
+        override suspend fun onDropped() {
             lock.withLock { cached = null; expiresAt = 0 }
         }
 
@@ -672,12 +682,37 @@ class AppController(
         return payload
     }
 
-    /** Forget a host on this phone only (the desktop keeps its record; revoke it there). */
+    /**
+     * Forget a host here, and revoke this phone's device row there.
+     *
+     * It used to drop the pairing on the phone only. The desktop kept the key
+     * enrolled and went on wrapping every new history epoch to it, and the
+     * backend kept issuing it grants — for a phone the user believed they had
+     * let go of. Revoking is what a person means by 忘记, and it is the one
+     * signal both other ends act on (spec §8.2).
+     *
+     * The local half never waits on the network: offline, the pairing is
+     * still forgotten here, and the user is told the desktop must finish it.
+     */
     suspend fun forgetHost(hostId: String) {
-        if (_state.value.activeHostId == hostId) disconnect()
+        val host = _state.value.paired.firstOrNull { it.hostId == hostId }
+        val wasActive = _state.value.activeHostId == hostId
+        if (wasActive) disconnect()
         val remaining = _state.value.paired.filterNot { it.hostId == hostId }
         persistPaired(remaining)
-        update { it.copy(paired = remaining, activeHostId = null) }
+        update { it.copy(paired = remaining, activeHostId = if (wasActive) null else it.activeHostId) }
+        if (host == null) return
+        try {
+            backend.revokeDevice(host.deviceId)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: BackendException) {
+            // Already gone there (revoked from the desktop, host removed): done.
+            if (error.status == 404) return
+            update {
+                it.copy(lastError = "已在这台手机上忘记，但服务器上的撤销没有成功（${error.message ?: "未知原因"}）；请到电脑上撤销这台手机")
+            }
+        }
     }
 
     // --- connection -----------------------------------------------------------------
@@ -1429,7 +1464,9 @@ class AppController(
     }
 
     fun clearError() {
-        update { it.copy(lastError = null) }
+        // Both: the host list's banner shows `hostsError` and calls this too,
+        // and clearing only `lastError` left that banner undismissable.
+        update { it.copy(lastError = null, hostsError = null) }
     }
 
     // --- persistence -----------------------------------------------------------------
@@ -1468,4 +1505,19 @@ class AppController(
         const val PAIRED_KEY = "paired-hosts.json"
         const val LOCK_KEY = "biometric-lock"
     }
+}
+
+/**
+ * A refused `POST /grant`, sorted into "this pairing is over" and "try later"
+ * (spec §9). 409 is the backend saying the device row is not active — pending
+ * or revoked; 404 that the device or host row is gone. Neither changes by
+ * retrying, and retrying is not free: every attempt spends the account's
+ * per-user critical budget, so a revoked phone left open used to lock every
+ * other phone of the account out of new grants. Anything else — no network,
+ * 429, a 5xx, an expired login — is worth the backoff.
+ */
+internal fun grantRefusal(error: BackendException): com.skidsense.mobile.transport.RcException = when (error.status) {
+    409 -> com.skidsense.mobile.transport.RcException("revoked", "这台手机已被撤销，需要重新扫码配对")
+    404 -> com.skidsense.mobile.transport.RcException("revoked", "服务器上已没有这次配对（电脑或这台手机已被移除），需要重新扫码配对")
+    else -> com.skidsense.mobile.transport.RcException("grant", error.message ?: "无法获取授权凭证")
 }
