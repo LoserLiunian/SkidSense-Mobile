@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Backup and device-to-device transfer (API 31+, where `allowBackup="false"`
+  no longer stops D2D on every vendor).
+
+  The secrets prefs and the app-private files are *bound to this install's*
+  Keystore: the master key can only be unwrapped by the Keystore key that
+  sealed it, and Keystore keys never migrate. Carrying the blobs to a new
+  device would only reproduce S27's broken store — the login that can never
+  save — instead of the clean re-pair Android should give. So both stores are
+  excluded everywhere.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="skidsense-secrets.xml" />
+        <exclude domain="file" path="skidsense/" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="skidsense-secrets.xml" />
+        <exclude domain="file" path="skidsense/" />
+    </device-transfer>
+</data-extraction-rules>

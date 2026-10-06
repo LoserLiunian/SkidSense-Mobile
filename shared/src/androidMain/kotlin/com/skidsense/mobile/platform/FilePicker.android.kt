@@ -43,7 +43,14 @@ actual fun rememberFilePicker(): FilePicker? {
     return remember(launcher, context) {
         FilePicker { onPicked, onError ->
             holder.pending = PickerCallback(onPicked, onError)
-            launcher.launch(arrayOf("*/*"))
+            try {
+                launcher.launch(arrayOf("*/*"))
+            } catch (error: android.content.ActivityNotFoundException) {
+                // A slim/managed ROM without DocumentsUI must not take the app
+                // down (N05): tell the user instead of crashing.
+                holder.pending = null
+                onError("这台设备上没有文件选择器，无法添加附件")
+            }
         }
     }
 }

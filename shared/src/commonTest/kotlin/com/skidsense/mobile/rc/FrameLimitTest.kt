@@ -39,6 +39,26 @@ class FrameLimitTest {
         assertEquals("too-large", error.code)
     }
 
+    /**
+     * `MAX_FRAME` is bytes on the wire (spec §5). The parser counted UTF-16
+     * units, so 2 Mi CJK units — about 6 MiB — passed it; only the real carrier's
+     * own byte check stood in the way, and a carrier without one had none.
+     */
+    @Test
+    fun theOuterFrameLimitIsCountedInBytes() {
+        fun hsr(fill: String) = """{"t":"hsr","code":"x","message":"$fill"}"""
+        val envelope = hsr("").length
+        val exactAscii = hsr("a".repeat(Protocol.MAX_FRAME - envelope))
+        assertEquals(Protocol.MAX_FRAME.toLong(), utf8Length(exactAscii))
+        assertEquals(OuterFrame.Reject::class, OuterFrames.parse(exactAscii)::class, "exactly MAX_FRAME bytes is a frame")
+        assertEquals("too-large", assertFailsWith<CryptoError> { OuterFrames.parse(hsr("a".repeat(Protocol.MAX_FRAME - envelope + 1))) }.code)
+
+        val cjk = hsr("好".repeat((Protocol.MAX_FRAME - envelope) / 3 + 1))
+        assertEquals(true, cjk.length < Protocol.MAX_FRAME, "fewer code units than the limit…")
+        assertEquals(true, utf8Length(cjk) > Protocol.MAX_FRAME, "…but more bytes")
+        assertEquals("too-large", assertFailsWith<CryptoError> { OuterFrames.parse(cjk) }.code)
+    }
+
     @Test
     fun utf8LengthCountsBytesNotCodeUnits() {
         assertEquals(1L, utf8Length("a"))

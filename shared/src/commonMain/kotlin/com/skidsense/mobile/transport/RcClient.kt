@@ -92,6 +92,9 @@ interface Credentials {
 
     /** The relay said the bearer is no good; the next relay attempt should re-authenticate. */
     suspend fun onUnauthorized() {}
+
+    /** The host kicked this device because the cached grant's scopes no longer stand (spec §6.5, C5). */
+    suspend fun onDropped() {}
 }
 
 data class ClientConfig(
@@ -193,12 +196,26 @@ class RcClient(
                     val why = connection.closed.await()
                     forward.cancel()
                     current = null
+                    // A relay refusal that arrives *after* the handshake is the
+                    // relay's own `relay-error` frame, which only the relay route
+                    // tolerates (anything else closes as a violation). As the
+                    // handshake error above it means the backend refused; here
+                    // it says the session behind the bearer is over, and like
+                    // the relay's handshake refusal it is final.
                     if (why is RelayRejected && why.permanent) {
                         _state.value = ClientState.Failed(why.message ?: "连接被拒绝", why.code)
                         wake.receive()
                         continue
                     }
                     if (why is RelayRejected && why.code == "unauthorized") credentials.onUnauthorized()
+                    if (why is HostBye && why.regrant) {
+                        // Kicked so the reconnect would see different scopes
+                        // (spec §6.5, C5): the cached grant is the old one, so
+                        // drop it rather than assume the backend has issued a
+                        // new one — a too-fresh fetch failing with 404 is why
+                        // this is not `freshGrant = true`.
+                        credentials.onDropped()
+                    }
                     // A connection that was up drops: reconnect promptly, once.
                     _state.value = ClientState.Waiting(why.message ?: "连接已断开", config.backoffBaseMs, 1)
                     withTimeoutOrNull(config.backoffBaseMs) { wake.receive() }
@@ -270,8 +287,20 @@ class RcClient(
                 return Outcome.Up(connection)
             } catch (error: CancellationException) {
                 throw error
+            } catch (error: HandshakeClosed) {
+                // The carrier died before the welcome, or something plaintext
+                // arrived after the host proved itself: this route is dead,
+                // and it says nothing about the device (spec §6.5, C6).
+                unreachable("${route.label}：${error.message ?: "连接失败"}")
             } catch (error: HandshakeRejected) {
-                if (error.permanent) return Outcome.Permanent(error)
+                if (error.permanent && route is Route.Relay) {
+                    // A *plaintext* refusal on the LAN is forgeable by anything
+                    // answering at that address — it must never end the round
+                    // on its own (spec §6.5, C6). The relay route is TLS to the
+                    // backend, which can identity-check the caller's device id,
+                    // so only the refusal through *it* counts as the host's word.
+                    return Outcome.Permanent(error)
+                }
                 refused(error.message ?: error.code)
                 // Rate limiting is per source; the relay is another source, so go on.
             } catch (error: RelayRejected) {
@@ -354,4 +383,11 @@ class RcClient(
     }
 
     val welcome: Welcome? get() = (state.value as? ClientState.Connected)?.welcome
+
+    /**
+     * An identity token for the connection currently up, or null. Attachments
+     * compare by identity: the desktop's upload stash dies with a connection,
+     * so a new one means staged ids are gone (spec §7 implies it; S28).
+     */
+    val connectionMarker: Any? get() = current
 }

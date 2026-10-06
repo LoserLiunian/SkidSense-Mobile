@@ -74,6 +74,8 @@ class FakeHost(
     var pairingCode: ByteArray? = null,
     /** When set, every hs1 is answered with this `hsr`. */
     var rejectWith: String? = null,
+    /** When set, only `connect` hs1s are refused with it: the host forgot the key but still takes an enrol. */
+    var rejectConnectWith: String? = null,
     /** Responses whose JSON is longer than this are sent in parts. */
     var partSize: Int = 512 * 1024,
     val scopes: List<String> = listOf("sessions", "prompt", "approve", "files", "git"),
@@ -107,6 +109,9 @@ class FakeHost(
 
     // --- terminal -------------------------------------------------------------
 
+    /** Runs between accepting `tui.open` and answering it. */
+    var beforeTuiOpenReply: (suspend () -> Unit)? = null
+
     /** Terminal writes received, in order, for the key that opened one. */
     val terminalInput = mutableListOf<String>()
     var terminalOpen = false
@@ -133,7 +138,7 @@ class FakeHost(
     private suspend fun runConnection(carrier: Carrier) {
         try {
             val hs1 = (OuterFrames.parse(carrier.incoming.receive()) as OuterFrame.Hs1).frame
-            rejectWith?.let {
+            (rejectWith ?: rejectConnectWith?.takeIf { hs1.mode == "connect" })?.let {
                 carrier.send(OuterFrames.encode(HsRejectFrame(it, "rejected").toJson()))
                 carrier.close()
                 return
@@ -171,31 +176,41 @@ class FakeHost(
                 put("future-field", "ignored")
             }.toString())
 
-            while (true) {
-                val text = carrier.incoming.receiveCatching().getOrNull() ?: break
-                val inner = RcJson.parseToJsonElement(opener.open((OuterFrames.parse(text) as OuterFrame.Data).frame)).jsonObject
-                when (inner.str("t")) {
-                    "req" -> {
-                        val id = inner.str("id")!!
-                        val method = inner.str("m")!!
-                        calls += method to inner["p"]
-                        val params = inner["p"] as? kotlinx.serialization.json.JsonObject
-                        if (method.startsWith("upload.") || method == "tui.open" || method == "tui.input" || method == "search.start") {
-                            scope.launch { respondUploadOrTui(conn, id, method, params) }
-                        } else {
-                            scope.launch { respond(conn, id, method, inner["p"]) }
-                        }
-                    }
-                    "ping" -> conn.sendInner(Inner.pong((inner["ts"] as JsonPrimitive).content.toLong()))
-                    "pong" -> pongs += 1
-                    "bye" -> {
-                        carrier.close()
-                        break
-                    }
-                }
+            try {
+                serveRequests(carrier, conn, opener)
+            } finally {
+                // The desktop's stash belongs to one connection (connection.ts
+                // clears it on close), so an id from a dead connection is gone.
+                uploads.clear()
             }
         } catch (_: Throwable) {
             carrier.close()
+        }
+    }
+
+    private suspend fun serveRequests(carrier: Carrier, conn: Live, opener: FrameOpener) {
+        while (true) {
+            val text = carrier.incoming.receiveCatching().getOrNull() ?: break
+            val inner = RcJson.parseToJsonElement(opener.open((OuterFrames.parse(text) as OuterFrame.Data).frame)).jsonObject
+            when (inner.str("t")) {
+                "req" -> {
+                    val id = inner.str("id")!!
+                    val method = inner.str("m")!!
+                    calls += method to inner["p"]
+                    val params = inner["p"] as? kotlinx.serialization.json.JsonObject
+                    if (method.startsWith("upload.") || method == "tui.open" || method == "tui.input" || method == "search.start") {
+                        scope.launch { respondUploadOrTui(conn, id, method, params) }
+                    } else {
+                        scope.launch { respond(conn, id, method, inner["p"]) }
+                    }
+                }
+                "ping" -> conn.sendInner(Inner.pong((inner["ts"] as JsonPrimitive).content.toLong()))
+                "pong" -> pongs += 1
+                "bye" -> {
+                    carrier.close()
+                    break
+                }
+            }
         }
     }
 
@@ -273,6 +288,8 @@ class FakeHost(
             }
             "tui.open" -> {
                 terminalOpen = true
+                // The desktop's first PTY output can be on the wire before the reply is read.
+                beforeTuiOpenReply?.invoke()
                 ok(buildJsonObject { put("ok", true); put("attached", false); put("command", "claude") })
             }
             "tui.input" -> {
@@ -379,6 +396,17 @@ class FakeHost(
 
     suspend fun drop() {
         live?.carrier?.close()
+    }
+
+    /** Say a sealed `bye` with a machine-readable [code] (spec §6.5), then close — how the desktop kicks a device. */
+    suspend fun kick(code: String?, reason: String = "这台设备的权限已更改，请重新连接") {
+        val conn = live ?: return
+        conn.sendInner(buildJsonObject {
+            put("t", "bye")
+            put("reason", reason)
+            if (code != null) put("code", code)
+        }.toString())
+        conn.carrier.close()
     }
 
     @Suppress("unused")

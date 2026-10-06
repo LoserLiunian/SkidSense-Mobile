@@ -64,12 +64,14 @@ fun FilesScreen(app: AppController, root: String, onBack: () -> Unit) {
     var query by remember { mutableStateOf("") }
     var regex by remember { mutableStateOf(false) }
     var searchError by remember { mutableStateOf<String?>(null) }
-    val searchState = app.search.collectAsState().value
+    val searchState = app.search.collectAsState().value?.fold
 
     // Leaving the screen cancels the search: the desktop keeps streaming
     // progress until it is told otherwise, and nobody would be reading it.
+    // Not `scope.launch`: that scope is cancelled with the composition before
+    // the body runs (S29), which is why the cancel used never to leave.
     DisposableEffect(Unit) {
-        onDispose { scope.launch { app.cancelSearch(); app.clearSearch() } }
+        onDispose { app.cancelSearchBackground() }
     }
 
     suspend fun load(target: String) {

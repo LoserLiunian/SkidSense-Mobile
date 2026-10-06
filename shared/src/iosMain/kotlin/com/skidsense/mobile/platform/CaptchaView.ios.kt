@@ -13,7 +13,7 @@ import androidx.compose.ui.Modifier
  * login screen says so rather than pretending a challenge was solved.
  */
 @Composable
-actual fun CaptchaWebView(html: String, onResult: (String?) -> Unit, modifier: Modifier) {
+actual fun CaptchaWebView(html: String, onResult: (String?) -> Unit, modifier: Modifier, baseUrl: String) {
     Box(modifier) {
         Text("iOS 端的人机验证尚未实现")
     }

@@ -71,7 +71,10 @@ object OuterFrames {
      * that is not a well-formed outer frame.
      */
     fun parse(text: String): OuterFrame {
-        if (text.length > Protocol.MAX_FRAME) throw CryptoError("too-large", "帧过大")
+        // The limit is bytes on the wire (spec §5), not UTF-16 code units:
+        // 2 Mi CJK units are ~6 MiB, and a carrier without its own check
+        // (the in-memory one in tests) used to let that through.
+        if (utf8Length(text) > Protocol.MAX_FRAME) throw CryptoError("too-large", "帧过大")
         val obj = try {
             json.parseToJsonElement(text).jsonObject
         } catch (error: Exception) {

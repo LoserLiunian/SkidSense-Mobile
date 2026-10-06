@@ -127,7 +127,22 @@ fun HistoryScreen(
                 item { EmptyState("没有匹配的会话", "换个词试试。") }
             }
             items(shown, key = { it.sessionKey }) { entry ->
-                ItemCard(onClick = { open = entry }) {
+                ItemCard(onClick = {
+                    // The blob is fetched only now, for the session the user
+                    // actually opened (S25), and decryption results are cached
+                    // by the repository.
+                    scope.launch {
+                        loading = true
+                        try {
+                            open = repository.open(entry.sessionKey, entry.epoch, entry.updatedAt, entry.size)
+                            error = null
+                        } catch (failure: Throwable) {
+                            error = failure.message
+                        } finally {
+                            loading = false
+                        }
+                    }
+                }) {
                     Column {
                         CardTitle(entry.row?.title?.ifBlank { entry.sessionKey } ?: entry.sessionKey) {
                             if (entry.error != null) Pill("无法读取", MaterialTheme.colorScheme.error)

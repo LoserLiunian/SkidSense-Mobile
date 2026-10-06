@@ -12,6 +12,17 @@ interface SecretStore {
     fun delete(name: String)
 }
 
+/**
+ * What a store whose master key stopped decrypting offers its owner (S27): a
+ * device-to-device migration carries the blobs but never the Keystore, so the
+ * old ciphertexts are unrecoverable — the only honest move is to wipe and
+ * rebuild rather than fail every save forever. Returns true when it broke the
+ * store open and the caller should treat the session as gone.
+ */
+interface BrokenStoreRestorer {
+    fun restoreIfBroken(): Boolean
+}
+
 /** Non-secret app-private files (paired hosts, cached ciphertext). */
 interface FileStore {
     fun read(name: String): String?

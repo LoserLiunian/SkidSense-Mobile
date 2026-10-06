@@ -126,8 +126,18 @@ object Enrollment {
                 return welcome
             } catch (error: CancellationException) {
                 throw error
+            } catch (error: HandshakeClosed) {
+                // Same rule as the client's loop: the carrier died before the
+                // welcome. This route is dead; the device is not.
+                unreachable(error)
             } catch (error: HandshakeRejected) {
-                if (error.permanent) throw error
+                // A plaintext `hsr` on a LAN address is forgeable by anything
+                // that answers there, so it never settles anything on its own
+                // (spec §6.5, C6): the remaining routes still run. Only the same
+                // refusal through the relay — TLS to the backend, which
+                // identity-checks the device before forwarding — counts as the
+                // host's word, and only it stops the walk.
+                if (error.permanent && route is Route.Relay) throw error
                 refused(error)
             } catch (error: RelayRejected) {
                 if (error.permanent) throw error

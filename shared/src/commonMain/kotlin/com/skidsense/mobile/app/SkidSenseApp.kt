@@ -58,8 +58,17 @@ fun SkidSenseApp(
     carriers: CarrierFactory,
     platform: DevicePlatform,
     biometrics: BiometricGate,
-    /** A `skidsense://` link the app was opened with, if any (a tapped QR code). */
-    launchLink: String? = null
+    /**
+     * The one-shot identity of a tapped pairing link (S32): a counter the
+     * Activity increments per accepted link, so acting on a link keys on an
+     * event — not on the string, which made a second tap of the same link
+     * invisible and let a recreated Activity replay the old intent's data.
+     */
+    launchSeq: Int = 0,
+    /** The link's payload for the pairing screen to prefill with. */
+    launchLink: String? = null,
+    /** Called once the link has been acted on, so the Activity forgets the intent data too. */
+    onLaunchHandled: () -> Unit = {}
 ) {
     val scope = rememberCoroutineScope()
     val controller = remember(backend, carriers, platform) {
@@ -75,7 +84,7 @@ fun SkidSenseApp(
     }
     var screen by remember { mutableStateOf<Screen>(Screen.Login) }
     var stack by remember { mutableStateOf<List<Screen>>(emptyList()) }
-    var deepLink by remember(launchLink) { mutableStateOf(DeepLink.parse(launchLink)) }
+    var deepLink by remember(launchSeq) { mutableStateOf(if (launchSeq > 0) DeepLink.parse(launchLink) else null) }
     // Collected, not read: `.value` subscribes Compose to nothing, so the
     // effects below keyed on `state.ready` and `state.user` ran once with the
     // first value and never again — a tapped pairing link waited forever for
@@ -109,16 +118,20 @@ fun SkidSenseApp(
     //
     // Signed out, the link is kept rather than dropped: signing in changes
     // `state.user`, this runs again, and the pairing screen opens on the link
-    // the user tapped instead of asking for it a second time.
-    LaunchedEffect(deepLink, state.ready, state.user) {
-        if (deepLink == null || !state.ready) return@LaunchedEffect
+    // the user tapped instead of asking for it a second time. The same hold
+    // applies when a session expires *under* a pending link (S31): going back
+    // to login must not spend it.
+    LaunchedEffect(launchSeq, state.ready, state.user) {
+        if (launchSeq <= 0 || !state.ready) return@LaunchedEffect
         if (state.user == null) {
             screen = Screen.Login
             return@LaunchedEffect
         }
+        if (deepLink == null) return@LaunchedEffect
         stack = emptyList()
         screen = Screen.Pairing
         deepLink = null
+        onLaunchHandled()
     }
 
     // A lock only ever shows after the app has been idle-locked; the first

@@ -48,6 +48,8 @@ class HistoryRepository(
     private val lock = Mutex()
     /** epoch → the host's history key for that epoch. */
     private val keys = HashMap<Long, ByteArray>()
+    /** sessionKey → the decrypted entry; a blob is downloaded once, never per visit. */
+    private val cache = HashMap<String, HistoryEntry>()
 
     suspend fun keysKnown(): Boolean = lock.withLock { keys.isNotEmpty() }
 
@@ -75,25 +77,33 @@ class HistoryRepository(
     suspend fun currentEpoch(): Long? = lock.withLock { keys.keys.maxOrNull() }
 
     /**
-     * List and decrypt everything this device can read, newest first. A row
-     * whose epoch has no key is reported with [HistoryEntry.error] rather than
-     * dropped, so the UI can say the host has not re-wrapped for this device.
+     * The *list* only, newest first (S25): each session's blob is downloaded
+     * and decrypted on open — fetching them all here put 2+N requests on the
+     * shared per-IP budget on every visit, and rate-limited the whole app.
+     *
+     * A row whose epoch this device has no key for is reported with
+     * [HistoryEntry.error], so the UI can say the host has not re-wrapped for
+     * this device without pretending the session is empty.
      */
     suspend fun load(since: Long = 0): List<HistoryEntry> {
         val rows = backend.historySessions(hostId, since)
-        return rows.map { row -> open(row.sessionKey, row.epoch, row.updatedAt, row.size) }
+        return rows.map { row -> HistoryEntry(row.sessionKey, row.epoch, row.updatedAt, row.size, null, emptyList()) }
             .sortedByDescending { it.updatedAt }
     }
 
+    /** The one call that downloads: when the user actually opens a session. */
     suspend fun open(sessionKey: String, epoch: Long, updatedAt: Long, size: Long): HistoryEntry {
         val key = lock.withLock { keys[epoch] }
             ?: return HistoryEntry(sessionKey, epoch, updatedAt, size, null, emptyList(), "这台手机没有第 $epoch 代历史密钥，等电脑端重新上传后再看")
+        lock.withLock { cache[sessionKey] }?.let { return it }
         val row = try {
             backend.historyBlob(hostId, sessionKey)
         } catch (error: Throwable) {
             return HistoryEntry(sessionKey, epoch, updatedAt, size, null, emptyList(), error.message ?: "无法下载")
         }
-        return open(row.blob, sessionKey, row.epoch, row.updatedAt)
+        return open(row.blob, sessionKey, row.epoch, row.updatedAt).also { entry ->
+            if (entry.error == null) lock.withLock { cache[sessionKey] = entry }
+        }
     }
 
     /** Open one blob with the key for its epoch. */

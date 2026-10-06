@@ -290,6 +290,24 @@ data class OpenSessionResponse(
 @Serializable
 data class PromptResponse(val ok: Boolean = false, @SerialName("sessionKey") val sessionKey: String? = null, val taskId: String? = null, val error: String? = null)
 
+/**
+ * One transport-level timestamp: the desktop sends Node's `mtimeMs`, which is
+ * a *fractional* millisecond on APFS/ext4/NTFS — and a `Long` decoder fails
+ * fs.list wholesale on the first such file (N01, spec §7 C7: decode as
+ * floating point, the fraction may be dropped).
+ */
+object MtimeSerializer : kotlinx.serialization.KSerializer<Long> {
+    override val descriptor = kotlinx.serialization.descriptors.PrimitiveSerialDescriptor("Mtime", kotlinx.serialization.descriptors.PrimitiveKind.DOUBLE)
+    override fun serialize(encoder: kotlinx.serialization.encoding.Encoder, value: Long) = encoder.encodeLong(value)
+    override fun deserialize(decoder: kotlinx.serialization.encoding.Decoder): Long = decoder.decodeDouble().toLong()
+}
+
+object NullableMtimeSerializer : kotlinx.serialization.KSerializer<Long?> {
+    override val descriptor = kotlinx.serialization.descriptors.PrimitiveSerialDescriptor("Mtime?", kotlinx.serialization.descriptors.PrimitiveKind.DOUBLE)
+    override fun serialize(encoder: kotlinx.serialization.encoding.Encoder, value: Long?) { if (value != null) encoder.encodeLong(value) }
+    override fun deserialize(decoder: kotlinx.serialization.encoding.Decoder): Long? = decoder.decodeDouble().toLong()
+}
+
 /** One directory row — `DirEntry` in `src/shared/ipc.ts`. */
 @Serializable
 data class DirEntry(
@@ -297,7 +315,7 @@ data class DirEntry(
     val path: String = "",
     val kind: String = "file",
     val size: Long = 0,
-    val mtime: Long = 0,
+    @Serializable(with = MtimeSerializer::class) val mtime: Long = 0,
     val git: String? = null
 )
 
@@ -312,7 +330,7 @@ data class ReadFileResult(
     val base64: String? = null,
     val mime: String = "",
     val size: Long = 0,
-    val mtime: Long = 0,
+    @Serializable(with = MtimeSerializer::class) val mtime: Long = 0,
     val lines: Int = 0,
     val etag: String = ""
 )
@@ -322,7 +340,7 @@ data class ReadFileResult(
 data class WriteFileResult(
     val ok: Boolean = false,
     val etag: String? = null,
-    val mtime: Long? = null,
+    @Serializable(with = NullableMtimeSerializer::class) val mtime: Long? = null,
     val error: String? = null,
     val conflict: Boolean? = null
 )

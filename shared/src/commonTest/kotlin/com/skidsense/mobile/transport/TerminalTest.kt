@@ -42,13 +42,13 @@ class TerminalTest {
     /** Records what the page would have been told to draw. */
     private class FakePage : TerminalSink {
         val drawn = StringBuilder()
-        val events = mutableListOf<Triple<String, Int, String>>()
+        val events = mutableListOf<TerminalChannel.ExitInfo>()
         override fun onData(key: String, data: String) {
             drawn.append(data)
         }
 
-        override fun onExit(key: String, code: Int, reason: String) {
-            events += Triple(key, code, reason)
+        override fun onExit(key: String, code: Int, reason: String, tail: String) {
+            events += TerminalChannel.ExitInfo(key, code, reason, tail)
         }
     }
 
@@ -101,7 +101,7 @@ class TerminalTest {
                 if (event.kind == "tui.data") {
                     TerminalChannel.decodeData(event.payload)?.let { (key, data) -> channel.onData(key, data) }
                 } else if (event.kind == "tui.exit") {
-                    TerminalChannel.decodeExit(event.payload)?.let { (key, code, reason) -> channel.onExit(key, code, reason) }
+                    TerminalChannel.decodeExit(event.payload)?.let { exit -> channel.onExit(exit.key, exit.code, exit.reason, exit.tail) }
                 }
             }
         }
@@ -163,7 +163,7 @@ class TerminalTest {
         val channel = TerminalChannel("claude:1")
         val page = RecordingHost()
         channel.attach(page)
-        channel.onExit("claude:1", 0, "process exited")
+        channel.onExit("claude:1", 0, "process exited", "")
         assertTrue(page.written.toString().contains("终端已结束"))
         assertTrue(page.written.toString().contains("process exited"))
     }
@@ -185,12 +185,13 @@ class TerminalTest {
             "claude:1" to "hi",
             TerminalChannel.decodeData(buildJsonObject { put("key", "claude:1"); put("data", "hi") })
         )
-        assertEquals(
-            Triple("claude:1", 3, "boom"),
-            TerminalChannel.decodeExit(buildJsonObject {
-                put("key", "claude:1"); put("code", 3); put("reason", "boom")
-            })
-        )
+        val decoded = TerminalChannel.decodeExit(buildJsonObject {
+            put("key", "claude:1"); put("code", 3); put("reason", "boom")
+        })
+        assertEquals("claude:1", decoded?.key)
+        assertEquals(3, decoded?.code)
+        assertEquals("boom", decoded?.reason)
+        assertEquals("", decoded?.tail)
         assertEquals(null, TerminalChannel.decodeData(buildJsonObject { put("key", "claude:1") }))
         assertEquals(null, TerminalChannel.decodeExit(JsonPrimitive("nonsense")))
     }

@@ -25,10 +25,14 @@ class MainActivity : FragmentActivity() {
     private var environment: AndroidEnvironment? = null
 
     /**
-     * A `skidsense://pair/1?d=…` link the app was opened with — a tapped QR
-     * code, as opposed to a scanned one. Read from the intent, then used by the
-     * shell to open the pairing screen.
+     * A `skidsense://pair/1?d=…` link as a *one-shot event*, not a value
+     * (S32): an incrementing number per accepted link, because the string
+     * itself is what made a second tap of the same link a no-op
+     * (`remember(link)` never re-ran), and what let a recreated Activity
+     * replay an old intent's data. The Compose side keeps the string for
+     * prefill; the *decision* to act keys on this counter.
      */
+    private var launchSeq by mutableStateOf(0)
     private var launchLink: String? by mutableStateOf(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -36,7 +40,15 @@ class MainActivity : FragmentActivity() {
         super.onCreate(savedInstanceState)
         val env = AndroidEnvironment(this)
         environment = env
-        launchLink = pairingLink(intent)
+        // A link is taken only from a genuine delivery: a recreation
+        // (savedInstanceState set) or a task restored from history replays the
+        // last intent's data rather than a new tap.
+        if (savedInstanceState == null && !fromHistory(intent)) {
+            pairingLink(intent)?.let {
+                launchLink = it
+                launchSeq = 1
+            }
+        }
         setContent {
             RcTheme {
                 SkidSenseApp(
@@ -44,7 +56,9 @@ class MainActivity : FragmentActivity() {
                     carriers = env.carriers,
                     platform = env.platform,
                     biometrics = BiometricGate { title, onResult -> promptBiometric(title, onResult) },
-                    launchLink = launchLink
+                    launchSeq = launchSeq,
+                    launchLink = launchLink,
+                    onLaunchHandled = ::consumeLaunchLink
                 )
             }
         }
@@ -54,8 +68,26 @@ class MainActivity : FragmentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        pairingLink(intent)?.let { launchLink = it }
+        if (fromHistory(intent)) return
+        pairingLink(intent)?.let {
+            launchLink = it
+            launchSeq += 1
+        }
     }
+
+    /**
+     * The link the shell already consumed is erased at the source too: as long
+     * as the intent still carried the data, the next recreation replayed it.
+     */
+    private fun consumeLaunchLink() {
+        pairingLink(intent)?.let {
+            intent.data = null
+            setIntent(intent)
+        }
+    }
+
+    private fun fromHistory(intent: Intent?): Boolean =
+        intent != null && (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0
 
     private fun pairingLink(intent: Intent?): String? =
         intent?.dataString?.takeIf { it.startsWith("skidsense://") }

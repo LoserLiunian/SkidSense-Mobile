@@ -197,6 +197,12 @@ class ClientTest {
         client.stop()
     }
 
+    /**
+     * The same refusal from *both* the LAN and the relay is final (C6): the
+     * relay's is the one that counts. The LAN-only case — which used to end
+     * here too, before §6.5 required trying the relay first — is covered in
+     * `HostSignalTest.aPlaintextRefusalOnTheLanStillTriesTheRelay`.
+     */
     @Test
     fun unknownDeviceIsPermanent() = runTest {
         val host = backgroundScope.host().apply { rejectWith = "unknown-device" }

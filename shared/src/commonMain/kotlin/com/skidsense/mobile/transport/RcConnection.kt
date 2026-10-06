@@ -82,6 +82,19 @@ class RcConnection private constructor(
         var bytes: Long = 0
     }
 
+    /**
+     * A `part`/`parts` field must be a JSON integer (spec §6.3, C3): the lenient
+     * `intOrNull` cannot tell `"0"` from `0`, and a `parts` past the Int range
+     * used to read as *absent*, so the frame fell through to the
+     * ordinary-response path and failed as `internal` instead of `bad-response`.
+     * Returns -1 for anything that is not a JSON integer.
+     */
+    private fun JsonObject.jsonInt(key: String): Int {
+        val value = this[key] as? JsonPrimitive ?: return -1
+        if (value.isString) return -1
+        return value.content.toIntOrNull() ?: -1
+    }
+
     companion object {
         private fun now(): Long = Clock.System.now().toEpochMilliseconds()
 
@@ -110,7 +123,10 @@ class RcConnection private constructor(
                             frame.frame.code,
                             HSR_MESSAGES[frame.frame.code] ?: "电脑拒绝了连接（${frame.frame.code}）"
                         )
-                        else -> throw ConnectionClosed("握手应答无效")
+                        is OuterFrame.Data,
+                        is OuterFrame.Hs1,
+                        is OuterFrame.Data -> throw HandshakeRejected("handshake-failed", "握手应答无效")
+                        is OuterFrame.RelayError -> error("unreachable: receiveOuter rethrows RelayError")
                     }
                     val keys = initiator.finish(hs2)
                     val sealer = FrameSealer(keys.send)
@@ -119,28 +135,40 @@ class RcConnection private constructor(
 
                     val first = when (val frame = receiveOuter(carrier, route)) {
                         is OuterFrame.Data -> opener.open(frame.frame)
-                        is OuterFrame.Reject -> throw HandshakeRejected(
-                            frame.frame.code,
-                            HSR_MESSAGES[frame.frame.code] ?: "电脑拒绝了连接（${frame.frame.code}）"
-                        )
-                        else -> throw ConnectionClosed("握手后收到了无效的帧")
+                        // A plaintext `hsr` after a valid `hs2` is somebody
+                        // else's: the host has proven its key and the desktop
+                        // never rejects past this point, so this is a broken
+                        // connection, not the host refusing the device (C6).
+                        is OuterFrame.Reject -> throw HandshakeClosed("握手确认后收到了明文拒绝帧（疑似伪造）")
+                        is OuterFrame.Hs1,
+                        is OuterFrame.Hs2 -> throw HandshakeRejected("handshake-failed", "握手后收到了无效的帧")
+                        is OuterFrame.RelayError -> error("unreachable: receiveOuter rethrows RelayError")
                     }
                     val message = parseInner(first)
                     when (message.str("t")) {
                         "welcome" -> {
                             val welcome = RcJson.decodeFromJsonElement(Welcome.serializer(), message)
                             if (welcome.host.id.isNotEmpty() && welcome.host.id != initiator.hostId) {
-                                throw ConnectionClosed("电脑报告的主机 id 与配对时不一致")
+                                throw HandshakeRejected("handshake-failed", "电脑报告的主机 id 与配对时不一致")
                             }
                             RcConnection(carrier, sealer, opener, welcome, route, config, scope).also { it.start() }
                         }
                         "bye" -> throw HelloRefused(message.str("reason") ?: "电脑拒绝了这台手机")
-                        else -> throw ConnectionClosed("电脑没有回应 hello")
+                        else -> throw HandshakeRejected("handshake-failed", "电脑没有回应 hello")
                     }
                 }
             } catch (error: TimeoutCancellationException) {
                 carrier.close("handshake timeout")
                 throw ConnectionClosed("握手超时", error)
+            } catch (error: HandshakeRejected) {
+                carrier.close("handshake rejected")
+                throw error
+            } catch (error: RelayRejected) {
+                carrier.close("relay rejected")
+                throw error
+            } catch (error: RcException) {
+                carrier.close("handshake failed")
+                throw if (error is ConnectionClosed) HandshakeClosed(error.message ?: "", error) else error
             } catch (error: Throwable) {
                 carrier.close("handshake failed")
                 throw error
@@ -221,7 +249,12 @@ class RcConnection private constructor(
                 sendInner(Inner.pong(ts))
             }
             "pong" -> Unit
-            "bye" -> throw ConnectionClosed(message.str("reason")?.let { "电脑断开了连接：$it" } ?: "电脑断开了连接")
+            // `code` is optional (spec §6.5, C5): a desktop from before it
+            // sends only the reason, which is then all there is to show.
+            "bye" -> throw HostBye(
+                message.str("code"),
+                message.str("reason")?.let { "电脑断开了连接：$it" } ?: "电脑断开了连接"
+            )
             // An unknown inner type from a newer host is ignored, not fatal.
             else -> Unit
         }
@@ -230,9 +263,12 @@ class RcConnection private constructor(
     private suspend fun onResponse(message: JsonObject) {
         val id = message.str("id") ?: return
         val entry = stateLock.withLock { pending[id] } ?: return
-        val partsTotal = (message["parts"] as? JsonPrimitive)?.intOrNull
-        if (partsTotal != null) {
-            val part = (message["part"] as? JsonPrimitive)?.intOrNull
+        // The field's *presence* marks a parted response, so a malformed
+        // `parts` is still a parted response — a broken one (C3), rather than
+        // an ordinary response that happens to fail somewhere else.
+        if (message["parts"] != null) {
+            val partsTotal = message.jsonInt("parts")
+            val part = message.jsonInt("part")
             val data = message.str("d")
             val complete = stateLock.withLock {
                 // The count is checked before it sizes anything: allocating
@@ -244,8 +280,18 @@ class RcConnection private constructor(
                 }
                 val buffer = entry.parts ?: arrayOfNulls<String>(partsTotal).also { entry.parts = it }
                 when {
-                    buffer.size != partsTotal || part == null || part !in 0 until partsTotal || data == null -> {
+                    buffer.size != partsTotal || part !in 0 until partsTotal || data == null -> {
+                        // `parts` falling out of range also covers a `parts`
+                        // that changed mid-stream (buffer.size says what the
+                        // first slice declared) and an out-of-range `part`.
                         failLocked(id, entry, RcException("bad-response", "分片响应格式错误"))
+                        null
+                    }
+                    buffer[part] != null -> {
+                        // A repeated slice used to overwrite and charge its
+                        // bytes twice; the host is authenticated, but a
+                        // duplicate is still a malformed response.
+                        failLocked(id, entry, RcException("bad-response", "分片重复到达"))
                         null
                     }
                     else -> {

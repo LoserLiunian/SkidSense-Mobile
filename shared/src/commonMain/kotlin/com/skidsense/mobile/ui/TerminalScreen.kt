@@ -59,24 +59,33 @@ fun TerminalScreen(app: AppController, sessionKey: String, onBack: () -> Unit) {
 
     LaunchedEffect(confirmed, connected) {
         if (!confirmed || !connected) return@LaunchedEffect
+        // The sink registers *before* the open: the CLI's first screen is on
+        // the wire milliseconds after the reply, and a sink installed only
+        // after it misses exactly that chunk (N04). Whatever arrives in the
+        // gap between is still not lost — the controller buffers it and hands
+        // it over with the registration.
+        app.attachTerminal(sessionKey, host)
         try {
             app.openTerminal(sessionKey, cols, rows)
             opened = true
         } catch (failure: Throwable) {
+            app.detachTerminal(host)
             error = failure.message ?: "无法打开终端"
             confirmed = false
         }
     }
 
     // Output is delivered as `tui.data` events; the controller hands them here.
-    DisposableEffect(host, opened) {
-        app.terminalSink = if (opened) host else null
-        onDispose { if (app.terminalSink === host) app.terminalSink = null }
+    DisposableEffect(host) {
+        onDispose { app.detachTerminal(host) }
     }
 
     DisposableEffect(sessionKey) {
         onDispose {
-            scope.launch { runCatching { app.closeTerminal(sessionKey) } }
+            // Not `scope.launch`: this composition's scope is cancelled as the
+            // effect unwinds, before a queued body ever runs — which is why the
+            // close used to never leave the phone and the desktop's PTY ran on.
+            app.closeTerminalBackground(sessionKey)
         }
     }
 
@@ -183,10 +192,16 @@ class TerminalChannel(private val sessionKey: String) : TerminalSink {
         }
     }
 
-    override fun onExit(key: String, code: Int, reason: String) {
+    override fun onExit(key: String, code: Int, reason: String, tail: String) {
         if (key != sessionKey) return
         page?.write("\r\n" + ESC + "[2m[终端已结束：" + reason.ifBlank { "退出码 $code" } + "]" + ESC + "[0m\r\n")
+        // The host keeps the last output of a process that died before drawing
+        // anything (C2): worth showing only when the exit itself was abnormal.
+        if (tail.isNotEmpty()) page?.write(tail.replace("\n", "\r\n") + "\r\n")
     }
+
+    /** Everything a `tui.exit` carries (spec §6.4, C2). */
+    class ExitInfo(val key: String, val code: Int, val reason: String, val tail: String)
 
     /** The `tui.data` payload: `{key, data}`. */
     companion object {
@@ -197,13 +212,28 @@ class TerminalChannel(private val sessionKey: String) : TerminalSink {
             key to data
         }.getOrNull()
 
-        fun decodeExit(payload: kotlinx.serialization.json.JsonElement): Triple<String, Int, String>? = runCatching {
+        /**
+         * `{key, code, signal, reason, tail}`: the human sentence wins when a
+         * current desktop sends it; otherwise it is rebuilt from `signal` — a
+         * signal-killed process used to report "退出码 0" because `signal` was
+         * read by neither side. `code` is nullable on the wire (a spawn that
+         * never ran), so a missing or non-integer value is -1, not 0.
+         */
+        fun decodeExit(payload: kotlinx.serialization.json.JsonElement): ExitInfo? = runCatching {
             val obj = payload as JsonObject
             val key = (obj["key"] as? JsonPrimitive)?.content ?: return null
-            val code = (obj["code"] as? JsonPrimitive)?.content?.toIntOrNull() ?: 0
-            val reason = (obj["reason"] as? JsonPrimitive)?.content.orEmpty()
-            Triple(key, code, reason)
+            val code = (obj["code"] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toIntOrNull() ?: -1
+            val signal = (obj["signal"] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toIntOrNull()
+            val reason = (obj["reason"] as? JsonPrimitive)?.content ?: defaultReason(code, signal)
+            val tail = (obj["tail"] as? JsonPrimitive)?.content.orEmpty()
+            ExitInfo(key, code, reason, tail)
         }.getOrNull()
+
+        private fun defaultReason(code: Int, signal: Int?): String = when {
+            signal != null && signal > 0 -> "被信号 $signal 终止"
+            code >= 0 -> "退出码 $code"
+            else -> "已结束"
+        }
     }
 }
 
@@ -213,5 +243,5 @@ private const val ESC = "\u001b"
 /** What the controller calls when terminal events arrive. */
 interface TerminalSink {
     fun onData(key: String, data: String)
-    fun onExit(key: String, code: Int, reason: String)
+    fun onExit(key: String, code: Int, reason: String, tail: String)
 }

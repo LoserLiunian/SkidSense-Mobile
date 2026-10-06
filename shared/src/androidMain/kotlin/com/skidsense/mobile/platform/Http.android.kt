@@ -6,6 +6,7 @@ import io.ktor.client.engine.okhttp.OkHttp
 import okhttp3.Interceptor
 import okhttp3.Response
 import java.util.concurrent.TimeUnit
+import javax.net.SocketFactory
 
 /**
  * Strips any `Origin` header, always.
@@ -38,6 +39,18 @@ actual fun platformHttpClient(forWebSockets: Boolean, block: HttpClientConfig<*>
                     // (spec §10.4); our own pings keep NAT bindings warm too.
                     pingInterval(20, TimeUnit.SECONDS)
                     readTimeout(0, TimeUnit.MILLISECONDS)
+                    // S30: deflate off (the answer is stripped before the
+                    // engine parses it) and inbound bytes capped at the
+                    // socket, so a pre-auth LAN peer cannot grow the heap.
+                    // The inner cap is generous over MAX_FRAME so the
+                    // seatbelt check in KtorCarrier, not this, is the rule.
+                    addNetworkInterceptor(OkHttpGuards.NoDeflateInterceptor)
+                    socketFactory(
+                        CappedSocketFactory(
+                            SocketFactory.getDefault(),
+                            com.skidsense.mobile.rc.Protocol.MAX_FRAME + 256L * 1024
+                        )
+                    )
                 } else {
                     connectTimeout(15, TimeUnit.SECONDS)
                     readTimeout(20, TimeUnit.SECONDS)

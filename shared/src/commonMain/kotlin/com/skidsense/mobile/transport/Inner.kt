@@ -88,8 +88,28 @@ class RelayRejected(code: String, message: String) : RcException(code, message) 
     val permanent: Boolean get() = code == "revoked"
 }
 
+/**
+ * The desktop ended the connection and said why with a machine-readable code
+ * (spec §6.5, C5). A kick whose grant scopes no longer stand must make the
+ * reconnect ask the backend for a new grant: the cached `rc-access` still
+ * lists the old ones for up to an hour, so reconnecting with it brings back
+ * exactly what the kick was meant to change.
+ */
+class HostBye(val byeCode: String?, message: String) : RcException("bye", message) {
+    val regrant: Boolean get() = byeCode == "scopes-changed" || byeCode == "revoked"
+}
+
 /** The connection ended (bye, carrier closed, protocol violation, timeout). */
-class ConnectionClosed(message: String, cause: Throwable? = null) : RcException("closed", message, cause)
+open class ConnectionClosed(message: String, cause: Throwable? = null) : RcException("closed", message, cause)
+
+/**
+ * The connection ended *while the handshake between `hs2` and `welcome` was
+ * still in doubt*: the carrier dropped mid-hello, or a plaintext frame
+ * arrived after the host had proven its key. Distinct from both a refusal
+ * ([HandshakeRejected]) and an established connection dying: this route is
+ * dead, and the device is not (spec §6.5, C6).
+ */
+class HandshakeClosed(message: String, cause: Throwable? = null) : ConnectionClosed(message, cause)
 
 internal fun JsonObject.str(key: String): String? =
     (this[key] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content

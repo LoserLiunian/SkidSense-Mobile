@@ -356,13 +356,18 @@ private fun Composer(
     val canApprove = state.canScope(Scopes.APPROVE)
     val canCall = state.can("turn.prompt")
     val picker = rememberFilePicker()
-    val staged = app.uploads.drafts
+    // A flow, not a getter: a plain read used to freeze the chips until some
+    // unrelated AppState change (N06).
+    val staged by app.uploads.draftFlow.collectAsState()
     var attachError by remember { mutableStateOf<String?>(null) }
 
-    // An upload the desktop has forgotten (10 minutes idle) is worse than no
-    // upload: leaving the screen drops everything staged.
+    // Leaving the screen drops what this session staged: an upload the desktop
+    // forgets (10 minutes idle, a dead connection) is worse than none. Not
+    // `scope.launch` — this composition's scope cancels before the body runs
+    // (S29), which is why attachments used to leak into the next session's
+    // composer.
     DisposableEffect(sessionKey) {
-        onDispose { scope.launch { app.detachAll() } }
+        onDispose { app.detachAllBackground(sessionKey) }
     }
 
     LaunchedEffect(agent, state.connected) {
@@ -409,7 +414,7 @@ private fun Composer(
                                 attachError = null
                                 scope.launch {
                                     try {
-                                        app.attach(picked.name, picked.mimeType, picked.bytes)
+                                        app.attach(picked.name, picked.mimeType, picked.bytes, sessionKey)
                                     } catch (failure: Throwable) {
                                         attachError = failure.message ?: "无法添加附件"
                                     }

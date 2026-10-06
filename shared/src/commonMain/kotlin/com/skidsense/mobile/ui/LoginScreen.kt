@@ -144,10 +144,22 @@ fun LoginScreen(app: AppController, onSignedIn: () -> Unit) {
             }
         } else if (needsTurnstile) {
             Hint("人机验证（Turnstile）")
+            var turnstileError by remember { mutableStateOf<String?>(null) }
             if (turnstile == null) {
+                ErrorBanner(turnstileError.orEmpty()) { turnstileError = null }
                 CaptchaWebView(
                     html = TurnstilePage.html(status?.turnstileSiteKey.orEmpty()),
-                    onResult = { result -> turnstile = result },
+                    onResult = { result ->
+                        // Coded results are the widget's error/expired hooks,
+                        // which used to surface as nothing but a dead button.
+                        if (result != null && result.startsWith("err:")) turnstileError = "人机验证失败（${result.removePrefix("err:")}），请重试"
+                        else if (result == null) turnstileError = "人机验证已过期，请重试"
+                        else { turnstileError = null; turnstile = result }
+                    },
+                    // Turnstile checks the page's hostname against the sitekey
+                    // allowlist — which the operator fills with the login
+                    // server, never with GeeTest's CDN (S26).
+                    baseUrl = base.trimEnd('/') + "/",
                     modifier = Modifier.fillMaxWidth().height(240.dp)
                 )
             } else {
@@ -272,10 +284,12 @@ object TurnstilePage {
         <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
         <style>body{margin:0;font-family:sans-serif}</style>
         </head><body>
-        <div class="cf-turnstile" data-sitekey="${captchaToken(siteKey)}" data-callback="onToken"></div>
+        <div class="cf-turnstile" data-sitekey="${captchaToken(siteKey)}" data-callback="onToken" data-error-callback="onTurnstileError" data-expired-callback="onTurnstileExpired"></div>
         <script>
           $CAPTCHA_SEND_JS
           function onToken(token) { skidsenseSend(token); }
+          function onTurnstileError(code) { skidsenseSend('err:' + code); }
+          function onTurnstileExpired() { skidsenseSend(''); }
         </script>
         </body></html>
     """.trimIndent()

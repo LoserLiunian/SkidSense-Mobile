@@ -1,0 +1,27 @@
+Third-party code bundled for the remote terminal
+================================================
+
+This directory bundles the terminal renderer the phone shows: the terminal
+emulates in JavaScript inside a locked-down WebView, and bundling is what
+keeps that renderer available offline, identical on every install, and served
+from no third-party origin (N03).
+
+Files
+-----
+
+  xterm.js      @xterm/xterm      6.0.0 (UMD build, lib/xterm.js)
+  xterm.css     @xterm/xterm      6.0.0 (css/xterm.css)
+  addon-fit.js  @xterm/addon-fit  0.11.0 (UMD build, lib/addon-fit.js)
+
+Source: https://github.com/xtermjs/xterm.js (copied from the desktop repo's
+node_modules/@xterm, the exact bytes released on npm).
+
+License: MIT (LICENSE-xterm.txt contains both packages' license texts — they
+are the same text; xterm.js's copyright lines and then addon-fit's).
+
+Why 6.x and not the 5.3.0 the CDN URLs used to pin: 5.3.0 calls
+Element.replaceChildren (Chromium 86+) with no guard, and this app's minSdk
+allows WebViews older than that. The bundled page installs a polyfill for
+replaceChildren *before* xterm loads regardless, so both generations work;
+taking the version the desktop already vendors also keeps the two terminal
+renderers on one upstream.

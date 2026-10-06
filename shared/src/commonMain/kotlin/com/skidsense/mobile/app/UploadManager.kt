@@ -6,6 +6,9 @@ import com.skidsense.mobile.rc.Primitives
 import com.skidsense.mobile.rc.u32be
 import com.skidsense.mobile.transport.RcException
 import com.skidsense.mobile.transport.RemoteCallError
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -34,9 +37,22 @@ import kotlinx.serialization.json.put
  * One upload is consumed by exactly one `turn.prompt`; an id that is still
  * unfinished when the prompt is sent fails the whole turn on the desktop, which
  * this class prevents by refusing to hand over an unfinished id.
+ *
+ * Three properties the UI relies on:
+ *
+ * - [connectionMarker] ties every upload to the connection it was uploaded on.
+ *   The desktop's stash is per-connection and dies with it
+ *   (`connection.ts` clears it on close), so an id out of a dead connection is
+ *   already refused at the next prompt — such drafts are dropped here instead
+ *   of looping through it (S28).
+ * - Uploads belong to a *session*: a file staged in one conversation is not
+ *   something a prompt from another should be able to carry off (S29).
+ * - [draftFlow] is the drafts as a flow: a plain getter used to leave the
+ *   composer showing a stale list until some unrelated recomposition (N06).
  */
 class UploadManager(
-    private val call: suspend (method: String, params: JsonObject) -> JsonObject?
+    private val call: suspend (method: String, params: JsonObject) -> JsonObject?,
+    private val connectionMarker: () -> Any?
 ) {
     /** How many files may be open at once (the desktop's `MAX_OPEN`). */
     val maxOpen: Int = 8
@@ -49,6 +65,10 @@ class UploadManager(
         val mimeType: String?,
         val size: Long,
         val bytes: ByteArray,
+        /** The session this file was picked for; a prompt takes only its own. */
+        val sessionKey: String?,
+        /** The connection this id lives on; the desktop forgets it with the connection. */
+        val connection: Any?,
         var sent: Long = 0
     ) {
         val complete: Boolean get() = sent >= size
@@ -56,13 +76,32 @@ class UploadManager(
     }
 
     /** An attachment the user has picked but not sent yet. */
-    data class Draft(val id: String, val name: String, val size: Long, val mimeType: String?)
+    data class Draft(val id: String, val name: String, val size: Long, val mimeType: String?, val sessionKey: String?)
 
-    val drafts: List<Draft> get() = open.values.map { Draft(it.id, it.name, it.size, it.mimeType) }
+    private val _drafts = MutableStateFlow<List<Draft>>(emptyList())
+
+    /** The drafts as Compose should see them: a fresh list on every change. */
+    val draftFlow: StateFlow<List<Draft>> = _drafts.asStateFlow()
+
+    /** The drafts list as a value, for non-Compose callers; prefer [draftFlow]. */
+    val drafts: List<Draft> get() = _drafts.value
+
+    private fun publish() {
+        _drafts.value = open.values.map { Draft(it.id, it.name, it.size, it.mimeType, it.sessionKey) }.toList()
+    }
 
     val count: Int get() = open.size
 
-    val totalBytes: Long get() = open.values.sumOf { it.size }
+    /**
+     * Drop every draft whose connection died. Called when a new connection
+     * announces itself; the ids it kept mean nothing to this one (S28).
+     */
+    fun dropStaleConnections() {
+        val live = connectionMarker()
+        val before = open.size
+        open.values.toList().forEach { if (it.connection !== live) open.remove(it.id) }
+        if (open.size != before) publish()
+    }
 
     /**
      * Register a file and send it. Small enough files go in one chunk; anything
@@ -72,7 +111,7 @@ class UploadManager(
      * desktop's cap is 20 MiB, and a partial stream would need a second source
      * of truth for the offset.
      */
-    suspend fun begin(name: String, mimeType: String?, bytes: ByteArray): Upload {
+    suspend fun begin(name: String, mimeType: String?, bytes: ByteArray, sessionKey: String? = null): Upload {
         if (open.size >= maxOpen) throw RcException("too-many", "同时上传的附件不能超过 $maxOpen 个")
         if (bytes.size > Protocol.MAX_UPLOAD) {
             throw RcException("too-large", "单个附件不能超过 ${Protocol.MAX_UPLOAD / 1024 / 1024} MiB")
@@ -92,8 +131,9 @@ class UploadManager(
         )
         val uploadId = (started?.get("id") as? JsonPrimitive)?.contentOrNull
             ?: throw RcException("bad-response", "电脑没有给出上传 id")
-        val upload = Upload(if (uploadId.isEmpty()) id else uploadId, name, mimeType, bytes.size.toLong(), bytes)
+        val upload = Upload(if (uploadId.isEmpty()) id else uploadId, name, mimeType, bytes.size.toLong(), bytes, sessionKey, connectionMarker())
         open[upload.id] = upload
+        publish()
         try {
             sendChunks(upload)
         } catch (error: Throwable) {
@@ -131,39 +171,39 @@ class UploadManager(
     }
 
     /**
-     * The ids for `turn.prompt`, which consumes them. Refuses to hand over an
-     * id that is unfinished, and forgets the ones it returns.
+     * The uploads for one prompt, handed over and forgotten; give them back
+     * with [restore] if the turn is not accepted *on the same connection*.
+     * Refuses while any is unfinished. Only [sessionKey]'s own drafts are
+     * taken — another session's stay untouched.
      */
-    fun takeIds(): List<String> = take().map { it.id }
-
-    /**
-     * The uploads for `turn.prompt`, handed over and forgotten; give them back
-     * with [restore] if the turn is not accepted. Refuses while any is unfinished.
-     */
-    fun take(): List<Upload> {
-        val unfinished = open.values.filterNot { it.complete }
+    fun take(sessionKey: String): List<Upload> {
+        val mine = open.values.filter { it.sessionKey == null || it.sessionKey == sessionKey }
+        val unfinished = mine.filterNot { it.complete }
         if (unfinished.isNotEmpty()) {
             throw RcException("upload-incomplete", "附件「${unfinished.first().name}」还没传完")
         }
-        val taken = open.values.toList()
-        open.clear()
-        return taken
+        mine.forEach { open.remove(it.id) }
+        publish()
+        return mine
     }
 
-    /** Put back the ids of a prompt that failed, so they can be sent again. */
+    /** Put back what a prompt did not get accepted, so it can be sent again. */
     fun restore(uploads: List<Upload>) {
+        if (uploads.isEmpty()) return
         for (upload in uploads) open[upload.id] = upload
+        publish()
     }
 
     suspend fun abort(id: String) {
-        open.remove(id)
+        if (open.remove(id) != null) publish()
         runCatching { call("upload.abort", buildJsonObject { put("id", id) }) }
     }
 
-    /** Abort everything open — called when leaving the screen, since the desktop expires them anyway. */
-    suspend fun abortAll() {
-        val ids = open.keys.toList()
-        open.clear()
+    /** Abort everything staged for one session — called when leaving its composer. */
+    suspend fun abortAll(sessionKey: String) {
+        val ids = open.values.filter { it.sessionKey == null || it.sessionKey == sessionKey }.map { it.id }
+        ids.forEach { open.remove(it) }
+        if (ids.isNotEmpty()) publish()
         for (id in ids) runCatching { call("upload.abort", buildJsonObject { put("id", id) }) }
     }
 

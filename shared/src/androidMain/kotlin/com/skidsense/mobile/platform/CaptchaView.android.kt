@@ -21,7 +21,7 @@ import androidx.compose.ui.viewinterop.AndroidView
  */
 @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
 @Composable
-actual fun CaptchaWebView(html: String, onResult: (String?) -> Unit, modifier: Modifier) {
+actual fun CaptchaWebView(html: String, onResult: (String?) -> Unit, modifier: Modifier, baseUrl: String) {
     val bridge = remember { CaptchaBridge() }
     bridge.onResult = onResult
     AndroidView(
@@ -33,12 +33,16 @@ actual fun CaptchaWebView(html: String, onResult: (String?) -> Unit, modifier: M
                 settings.allowFileAccess = false
                 settings.allowContentAccess = false
                 settings.javaScriptCanOpenWindowsAutomatically = false
+                // The origin is the page's identity: GeeTest's own CDN for its
+                // widget, the *login server* for Turnstile — whose sitekey
+                // allowlist checks the page hostname, and which every operator
+                // allowlist already names (S26).
                 webViewClient = WebViewClient()
                 addJavascriptInterface(bridge, CAPTCHA_BRIDGE)
-                loadDataWithBaseURL("https://static.geetest.com/", html, "text/html", "utf-8", null)
+                loadDataWithBaseURL(baseUrl, html, "text/html", "utf-8", null)
             }
         },
-        update = { it.loadDataWithBaseURL("https://static.geetest.com/", html, "text/html", "utf-8", null) }
+        update = { it.loadDataWithBaseURL(baseUrl, html, "text/html", "utf-8", null) }
     )
 }
 

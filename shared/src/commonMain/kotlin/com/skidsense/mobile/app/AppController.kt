@@ -36,7 +36,6 @@ import com.skidsense.mobile.transport.Enrollment
 import com.skidsense.mobile.transport.HostEndpoint
 import com.skidsense.mobile.transport.RcClient
 import com.skidsense.mobile.transport.RcJson
-import com.skidsense.mobile.transport.RcConnection
 import com.skidsense.mobile.transport.RemoteCallError
 import com.skidsense.mobile.transport.Welcome
 import kotlinx.coroutines.CancellationException
@@ -74,10 +73,24 @@ data class PairedHost(
     val lanPort: Int = 0,
     /** The backend both ends were signed in to at pairing time. */
     val server: String = "",
+    /** Whose pairing this is (S33) — 0 for a record written before pairings carried it. */
+    @kotlinx.serialization.SerialName("userId") val userId: Long = 0,
     val pairedAt: Long = 0
 ) {
     fun endpoint(): HostEndpoint = HostEndpoint(hostId, B64u.decode(hostKey, 32), deviceId, lanAddrs, lanPort)
+
+    /**
+     * Visible to [userId] on [server]: an exact account match, or a legacy
+     * record with no owner on the same backend, which is adopted for lack of a
+     * better claimant.
+     */
+    fun visibleTo(userId: Long, server: String): Boolean =
+        this.userId == userId || (this.userId == 0L && sameBackend(this.server, server))
 }
+
+/** Host+port equality, scheme-insensitive, like `pair`'s own check. */
+private fun sameBackend(a: String, b: String): Boolean =
+    com.skidsense.mobile.rc.normalizeBackendUrl(a) == com.skidsense.mobile.rc.normalizeBackendUrl(b)
 
 /** Everything the UI reads. One object, replaced wholesale on change. */
 data class AppState(
@@ -151,27 +164,74 @@ class AppController(
     private var eventJob: Job? = null
 
     /**
-     * Attachments for the composer. Recreated per connection: the desktop's
-     * stash is per-connection too, so ids from a dead connection mean nothing.
+     * Attachments for the composer. One manager per active host, tagged with
+     * the *live connection*: the desktop's stash is per-connection and dies
+     * with it, so a draft from a dead connection is dropped, never replayed.
      */
-    var uploads: UploadManager = UploadManager { method, params -> callOrNull(method, params) }
+    var uploads: UploadManager = UploadManager(::callOrNull, ::connectionMarker)
         private set
 
-    /** One in-flight files search, and the id this device chose for it (spec §6.4). */
-    private val _search = MutableStateFlow<SearchFold?>(null)
-    val search: StateFlow<SearchFold?> = _search.asStateFlow()
+    /**
+     * What an upload's connection is compared with, by object identity: nil
+     * until a connection is up, and a draft staged offline is dropped at the
+     * first connection — it never had a live id.
+     */
+    private fun connectionMarker(): Any? = client?.connectionMarker
 
-    /** The device's static X25519 key pair, from the Keystore. */
-    val identity: KeyPair by lazy {
-        val stored = secrets.get(IDENTITY_KEY)
-        if (stored != null && stored.size == 32) {
-            Primitives.keyPairFromPrivate(stored)
-        } else {
-            val fresh = Primitives.generateKeyPair()
-            secrets.put(IDENTITY_KEY, fresh.priv)
-            fresh
-        }
+    /**
+     * One in-flight files search (spec §6.4), exposed through a flow that is
+     * rebuilt on every accepted frame: the fold mutates as `search.progress`
+     * arrives, and assigning *the same instance* back to a StateFlow emits
+     * nothing (identity compare) — which is exactly why results never showed
+     * (N02). A versioned wrapper keeps the live fold and forces an emission.
+     */
+    /**
+     * The wrapper whose identity changes on every publish: a StateFlow's
+     * identity compare is what N02's bug filtered every update through.
+     */
+    class SearchView(val revision: Long, val fold: SearchFold)
+
+    private val _searchView = MutableStateFlow<SearchView?>(null)
+    private var searchRevision = 0L
+
+    val search: StateFlow<SearchView?> = _searchView.asStateFlow()
+
+    /** Set the live fold; the exposed flow sees a *new* object every time. */
+    private fun publishSearch(fold: SearchFold?) {
+        _searchView.value = fold?.let { SearchView(++searchRevision, it) }
     }
+
+    /**
+     * The device's static X25519 key pair, from the Keystore.
+     *
+     * A read that *throws* is not a missing key: it is the Keystore failing
+     * transiently (or the store having been wiped underneath us), and
+     * generating a fresh pair then would overwrite the real one when the next
+     * read succeeds — every paired host would go `unknown-device`. So a throw
+     * propagates, and a new key is made only for a clean `null` (S27).
+     */
+    private var identityCached: KeyPair? = null
+
+    val identity: KeyPair
+        get() = identityCached ?: run {
+            val stored = secrets.get(IDENTITY_KEY)
+            val pair = if (stored != null && stored.size == 32) {
+                Primitives.keyPairFromPrivate(stored)
+            } else {
+                val fresh = Primitives.generateKeyPair()
+                try {
+                    secrets.put(IDENTITY_KEY, fresh.priv)
+                } catch (error: Throwable) {
+                    // The key must not be used without being stored: the next
+                    // launch would generate another and the hosts would see a
+                    // stranger where they enrolled this one.
+                    throw CryptoError("no-keystore", "系统密钥库不可用，无法生成设备密钥", error)
+                }
+                fresh
+            }
+            identityCached = pair
+            pair
+        }
 
     val devicePublicKey: String get() = B64u.encode(identity.pub)
 
@@ -215,9 +275,15 @@ class AppController(
 
     // --- startup ------------------------------------------------------------------
 
+    private var restoredBrokenSecrets = false
+
     suspend fun start() {
+        if (!restoredBrokenSecrets) {
+            restoredBrokenSecrets = true
+            restoreSecretsIfBroken()
+        }
         val session = backend.session.value
-        val paired = loadPaired()
+        val paired = loadPaired(session?.userId ?: 0, session?.baseUrl ?: "")
         update {
             it.copy(
                 ready = true,
@@ -230,6 +296,40 @@ class AppController(
             )
         }
         if (session != null) refreshHosts()
+        // The landing screen keys on `user`: a session the backend has since
+        // revoked is cleared by the client's next refresh, and the UI must
+        // follow it back to login — not sit on a hosts list that cannot work
+        // (the banner used to be the only, dead, clue).
+        scope.launch {
+            backend.session.collect { current ->
+                if (current == null && _state.value.user != null) {
+                    onSessionExpired()
+                }
+            }
+        }
+    }
+
+    /**
+     * The store told us its master would not decrypt this install (S27): the
+     * session it held cannot be recovered, so the phone is signed out and the
+     * pairings (they belonged to a device key that is already gone) forgotten.
+     */
+    private fun restoreSecretsIfBroken() {
+        val restorer = (secrets as? com.skidsense.mobile.store.BrokenStoreRestorer) ?: return
+        if (!restorer.restoreIfBroken()) return
+        update { it.copy(lastError = "这台设备上的登录信息已损坏，已为你登出；请重新登录并重新配对") }
+    }
+
+    /** Back to login, keeping a tapped pairing link for after the sign-in. */
+    private fun onSessionExpired() {
+        disconnect()
+        update {
+            it.copy(
+                user = null, userId = 0, hosts = emptyList(), hostsError = null,
+                activeHostId = null, welcome = null, sessions = emptyList(),
+                lastError = "登录已过期，请重新登录"
+            )
+        }
     }
 
     // --- login --------------------------------------------------------------------
@@ -256,13 +356,21 @@ class AppController(
 
     private suspend fun onSignedIn() {
         val session = backend.session.value
-        update { it.copy(user = session?.username, userId = session?.userId ?: 0, lastError = null) }
+        // Pairings belong to an account (`server` + `userId`): another account
+        // must neither see the previous one's computers here nor overwrite its
+        // records with its own (S33).
+        val paired = loadPaired(session?.userId ?: 0, session?.baseUrl ?: "")
+        update { it.copy(user = session?.username, userId = session?.userId ?: 0, paired = paired, lastError = null) }
         refreshHosts()
     }
 
     suspend fun logout() {
         disconnect()
         backend.logout()
+        // Disk is deliberately untouched: the pairings still on it belong to
+        // the account that just left, and are read back if it signs in again
+        // (S33). Clearing them here used to risk the opposite bug — a same-
+        // process re-login writing its short list over the full one.
         update { it.copy(user = null, userId = 0, hosts = emptyList(), paired = emptyList(), activeHostId = null, welcome = null, sessions = emptyList()) }
     }
 
@@ -306,7 +414,7 @@ class AppController(
             )
         }
         if (updated != paired) {
-            savePaired(updated)
+            persistPaired(updated)
             update { it.copy(paired = updated) }
         }
         if (changed && _state.value.activeHostId != null) client?.retry()
@@ -344,7 +452,7 @@ class AppController(
         if (deviceId == host.deviceId) {
             disconnect()
             val remaining = _state.value.paired.filterNot { it.hostId == host.hostId }
-            savePaired(remaining)
+            persistPaired(remaining)
             update { it.copy(paired = remaining, activeHostId = null, welcome = null, sessions = emptyList()) }
         }
     }
@@ -422,11 +530,40 @@ class AppController(
         } catch (error: Throwable) {
             if (error is CancellationException) throw error
             if (error is com.skidsense.mobile.transport.HandshakeRejected && error.code == "unknown-device") {
-                return repairStale(payload, deviceId, onProgress)
+                // `hsr` is plaintext: this refusal only earns the destructive
+                // repair once the relay — TLS to the backend — agrees (C6).
+                return repairStaleConfirmed(payload, deviceId, grant, onProgress)
             }
             throw IllegalStateException(error.message ?: "重新连接失败", error)
         }
         return rememberPairing(payload, deviceId, welcome, onProgress)
+    }
+
+    /**
+     * The LAN walk said `unknown-device`; before believing it, the relay route
+     * is asked on its own (anything answering on a LAN address can forge the
+     * plaintext refusal). Only when the backend-mediated route says the same
+     * does the stale row get revoked. A relay that is itself unreachable says
+     * nothing — the phone keeps its pairing and the user retries.
+     */
+    private suspend fun repairStaleConfirmed(
+        payload: PairingPayload,
+        deviceId: String,
+        grant: String,
+        onProgress: (String) -> Unit
+    ): PairingPayload {
+        try {
+            val welcome = connectWithGrantRelayFirst(payload, deviceId, grant, onProgress)
+            // The relay took the plain `connect` after all: the LAN answer was
+            // the forged one. Nothing stale to repair; keep the pairing.
+            return rememberPairing(payload, deviceId, welcome, onProgress)
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            if (error is com.skidsense.mobile.transport.HandshakeRejected && error.code == "unknown-device") {
+                return repairStale(payload, deviceId, onProgress)
+            }
+            throw IllegalStateException(error.message ?: "重新连接失败", error)
+        }
     }
 
     /**
@@ -435,6 +572,13 @@ class AppController(
      * answer was lost, or a host whose identity was reset. Retrying `connect`
      * can never work (spec §4.3 step 5: the host admits only keys it saw pair),
      * and every new registration earns the same 409.
+     *
+     * Only called once the *relay* route has said `unknown-device` too
+     * ([connectWithGrantRelay]): `hsr` is pre-handshake plaintext, so on a LAN
+     * address it is forgeable by anything answering there, and a forged one
+     * must not be able to trigger what follows (spec §6.5, C6). Through the
+     * relay the refusal passes the backend's TLS and device check, which is
+     * as trustworthy a word as this device can get.
      *
      * The user is holding a fresh QR code, so this does what they would do by
      * hand: revoke the stale row, register again — a revoked key gets a new
@@ -453,6 +597,22 @@ class AppController(
         }
         val registration = backend.registerDevice(payload.hostId, deviceModel.ifBlank { "我的手机" }, devicePublicKey, platformName)
         return finishPairing(payload, registration.device.deviceId, onProgress, registration.ticket)
+    }
+
+    /**
+     * `unknown-device`, believed only once the relay route agrees (C6). The
+     * walk re-orders the endpoint so the relay comes first: a forged answer
+     * on a LAN address is skipped over, and only the route the backend itself
+     * vouches for can earn a revocation.
+     */
+    private suspend fun connectWithGrantRelayFirst(
+        payload: PairingPayload,
+        deviceId: String,
+        grant: String,
+        onProgress: (String) -> Unit
+    ): com.skidsense.mobile.transport.Welcome {
+        val relayOnly = payload.copy(lanAddrs = emptyList(), lanPort = 0)
+        return Enrollment.connectWithGrant(relayOnly, deviceId, identity, grant, carriers, scope, onProgress = onProgress)
     }
 
     private suspend fun finishPairing(
@@ -502,10 +662,11 @@ class AppController(
             lanAddrs = payload.lanAddrs,
             lanPort = payload.lanPort,
             server = payload.server,
+            userId = _state.value.userId,
             pairedAt = kotlin.time.Clock.System.now().toEpochMilliseconds()
         )
         val remaining = _state.value.paired.filterNot { it.hostId == host.hostId } + host
-        savePaired(remaining)
+        persistPaired(remaining)
         update { it.copy(paired = remaining, lastError = null) }
         onProgress("配对完成，正在读取这个设备被授予的权限…")
         return payload
@@ -515,7 +676,7 @@ class AppController(
     suspend fun forgetHost(hostId: String) {
         if (_state.value.activeHostId == hostId) disconnect()
         val remaining = _state.value.paired.filterNot { it.hostId == hostId }
-        savePaired(remaining)
+        persistPaired(remaining)
         update { it.copy(paired = remaining, activeHostId = null) }
     }
 
@@ -531,8 +692,8 @@ class AppController(
         val rc = RcClient(endpoint, identity, grants, carriers, scope)
         rc.onLanUnreachable = { onLanUnreachable() }
         client = rc
-        uploads = UploadManager { method, params -> callOrNull(method, params) }
-        _search.value = null
+        uploads = UploadManager(::callOrNull, ::connectionMarker)
+        publishSearch(null)
         update { it.copy(activeHostId = hostId, connection = ClientState.Idle, welcome = null, sessions = emptyList()) }
         eventJob = scope.launch { rc.state.collect { state -> onConnectionState(state) } }
         scope.launch { rc.events.collect { event -> onEvent(event.kind, event.payload) } }
@@ -542,6 +703,12 @@ class AppController(
     fun disconnect() {
         eventJob?.cancel()
         eventJob = null
+        resyncJob?.cancel()
+        resyncJob = null
+        reloadJob?.cancel()
+        reloadJob = null
+        terminalKey = null
+        terminalBuffer.clear()
         val rc = client ?: return
         client = null
         scope.launch { rc.stop() }
@@ -572,24 +739,72 @@ class AppController(
     private suspend fun onConnectionState(state: ClientState) {
         update { it.copy(connection = state, welcome = (state as? ClientState.Connected)?.welcome) }
         if (state is ClientState.Connected) {
+            // Whatever was uploaded on the connection that just died is gone
+            // from the desktop's stash too; only drafts from *this* connection
+            // may live on.
+            uploads.dropStaleConnections()
             if (_state.value.workspaces.isEmpty()) loadWorkspaces()
             loadSessions()
         }
     }
 
+    /**
+     * Events are folded in arrival order, but the work they trigger is *not*:
+     * a request launched from inside this collector (a gap's `turn.snapshot`,
+     * a `sessions.changed`'s `sessions.list`) used to run here, and while it
+     * waited, events filled every buffer between it and the read loop — past
+     * about a thousand of them the read loop blocked on `emit`, the response
+     * sat unread behind them, and the request died at the 30 s timeout. So the
+     * collector stays a fold: it updates state and hands work to the
+     * single-flight jobs below, which make the round trips in their own
+     * coroutines.
+     */
     private suspend fun onEvent(kind: String, payload: JsonElement) {
         when (kind) {
             "session.patch" -> onSessionPatch(payload)
-            "sessions.changed" -> loadSessions()
+            "sessions.changed" -> onSessionsChanged()
             "tui.data" -> com.skidsense.mobile.ui.TerminalChannel.decodeData(payload)?.let { (key, data) ->
-                terminalSink?.onData(key, data)
+                // The terminal's first bytes are on the wire before the screen
+                // has registered its sink (the CLI draws at once); they wait
+                // in [terminalBuffer] instead of being dropped.
+                val sink = terminalKey?.takeIf { terminalSink != null }
+                if (sink == key) terminalSink?.onData(key, data)
+                else if (terminalKey == key || terminalKey == null) terminalBuffer.getOrPut(key) { StringBuilder() }.append(data)
             }
-            "tui.exit" -> com.skidsense.mobile.ui.TerminalChannel.decodeExit(payload)?.let { (key, code, reason) ->
-                terminalSink?.onExit(key, code, reason)
+            "tui.exit" -> com.skidsense.mobile.ui.TerminalChannel.decodeExit(payload)?.let { exit ->
+                if (terminalKey == exit.key) {
+                    terminalBuffer.remove(exit.key)
+                    terminalSink?.onExit(exit.key, exit.code, exit.reason, exit.tail)
+                }
             }
             "search.progress" -> onSearchProgress(payload)
             // Received but not yet shown anywhere; the UI reads what it needs on demand.
-            "agents.changed", "fs.changed", "git.changed", "search.progress", "background.jobs" -> Unit
+            "agents.changed", "fs.changed", "git.changed", "background.jobs" -> Unit
+        }
+    }
+
+    /**
+     * The terminal the controller currently streams for, and the bytes that
+     * arrived before its sink registered (N04). The exit payload is decoded
+     * whole: `code`, `signal`, the human sentence and the tail (spec §6.4, C2).
+     */
+    private var terminalKey: String? = null
+    private val terminalBuffer = HashMap<String, StringBuilder>()
+
+    /** A terminal screen appeared for [key]: hand over everything held for it. */
+    fun attachTerminal(key: String, sink: com.skidsense.mobile.ui.TerminalSink) {
+        terminalKey = key
+        terminalSink = sink
+        terminalBuffer.remove(key)?.takeIf { it.isNotEmpty() }?.let { sink.onData(key, it.toString()) }
+    }
+
+    /** The bytes [attachTerminal] is still holding for [key] (test-visible). */
+    internal fun bufferedTerminalData(key: String): String = terminalBuffer[key]?.toString() ?: ""
+
+    fun detachTerminal(sink: com.skidsense.mobile.ui.TerminalSink) {
+        if (terminalSink === sink) {
+            terminalSink = null
+            terminalKey = null
         }
     }
 
@@ -597,13 +812,21 @@ class AppController(
     var openSessionKey: String? = null
         private set
 
-    private suspend fun onSessionPatch(payload: JsonElement) {
+    private fun onSessionPatch(payload: JsonElement) {
         val push = try {
             RcJson.decodeFromJsonElement(SessionPatchPush.serializer(), payload)
         } catch (_: Exception) {
             return
         }
         if (push.sessionKey != openSessionKey) return
+        // A re-read is bringing back a snapshot that already contains the
+        // patches still in flight: applying any of them under the old baseline
+        // would duplicate their deltas (the renderer's `useLiveTurn` treats
+        // everything until the answer as suspect for the same reason, C1).
+        if (resyncJob?.isActive == true) {
+            resyncPendingSeq = maxOf(resyncPendingSeq ?: push.seq, push.seq)
+            return
+        }
         when (liveTurn.apply(push)) {
             LiveTurn.Applied.Ok -> _live.value += 1
             LiveTurn.Applied.Gap -> resyncSnapshot(push)
@@ -611,24 +834,140 @@ class AppController(
     }
 
     /**
-     * A gap: read the turn whole. `turn.snapshot` answering null means the turn
-     * has ended, and the new seq is accepted anyway so the next frame is not
-     * mistaken for another gap (`useLiveTurn` in the desktop renderer).
+     * The one re-read in flight for the open session. A gap found while one is
+     * already running only moves its target seq forward; everything waits on
+     * the same `turn.snapshot` round trip (spec §6.4, C1).
      */
-    private suspend fun resyncSnapshot(push: SessionPatchPush) {
-        val fresh = try {
-            request("turn.snapshot", buildJsonObject { put("key", push.sessionKey) })?.let { element ->
-                if (element is JsonObject && element.isNotEmpty()) {
-                    RcJson.decodeFromJsonElement(TurnSnapshot.serializer(), element)
-                } else null
-            }
-        } catch (_: Throwable) {
-            null
+    private var resyncJob: Job? = null
+    private var resyncGeneration = 0
+    private var resyncPendingSeq: Long? = null
+
+    private fun resyncSnapshot(push: SessionPatchPush) {
+        val existing = resyncJob
+        if (existing?.isActive == true) {
+            resyncPendingSeq = maxOf(resyncPendingSeq ?: push.seq, push.seq)
+            return
         }
-        liveTurn.acceptSeq(push.seq)
-        if (fresh != null) liveTurn.setSnapshot(fresh)
-        _live.value += 1
-        loadSessions()
+        scheduleResync(push.seq)
+    }
+
+    private fun scheduleResync(triggerSeq: Long) {
+        val generation = ++resyncGeneration
+        val key = openSessionKey ?: return
+        resyncJob = scope.launch {
+            try {
+                var target = triggerSeq
+                while (true) {
+                    val fresh = readSnapshot(key)
+                    // A stale job must not write over what a newer `sessions.open`
+                    // or re-read already decided.
+                    if (generation != resyncGeneration) return@launch
+                    if (fresh == null) {
+                        // The guard in `readSnapshot`: null means the request
+                        // failed, so the baseline does not move and the next
+                        // frame — or `sessions.changed` — tries again.
+                        return@launch
+                    }
+                    if (fresh.snapshot != null) {
+                        liveTurn.setSnapshot(fresh.snapshot)
+                        liveTurn.acceptSeq(fresh.seq ?: target)
+                    } else {
+                        // The turn ended before the re-read arrived: the end it
+                        // never published lives in the session record, not in
+                        // `turn.snapshot`. Finishing from `sessions.open` is
+                        // what keeps the phone from showing it as running
+                        // forever (C1).
+                        val opened = runCatching {
+                            requestDecoded("sessions.open", buildJsonObject { put("key", key) }, OpenSessionResponse.serializer())
+                        }.getOrNull()
+                        if (opened == null) {
+                            // Both reads failed: nothing is known, the baseline
+                            // does not move, and the next frame — or a
+                            // `sessions.changed` — asks again (C1).
+                            return@launch
+                        }
+                        liveTurn.setHistory(opened.turns)
+                        liveTurn.setSnapshot(opened.live ?: opened.turns.lastOrNull()?.snapshot)
+                        liveTurn.acceptSeq(target)
+                    }
+                    _live.value += 1
+                    loadSessions()
+                    val again = resyncPendingSeq
+                    if (again == null || again == target) return@launch
+                    resyncPendingSeq = null
+                    target = again
+                }
+            } finally {
+                resyncJob = null
+                // A gap that arrived while this one ran still needs an answer:
+                // its patches were dropped, not applied.
+                val pending = resyncPendingSeq
+                if (pending != null && generation == resyncGeneration) {
+                    resyncPendingSeq = null
+                    resyncSnapshot(SessionPatchPush(sessionKey = key, seq = pending))
+                }
+            }
+        }
+    }
+
+    /** One decoded `turn.snapshot` response, or null when the request failed. */
+    private class SnapshotRead(val snapshot: TurnSnapshot?, val seq: Long?)
+
+    private suspend fun readSnapshot(key: String): SnapshotRead? {
+        val element = try {
+            request("turn.snapshot", buildJsonObject { put("key", key) })
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            return null
+        } ?: return SnapshotRead(null, null)
+        if (element !is JsonObject || element.isEmpty()) return SnapshotRead(null, null)
+        // A current desktop sends back the seq of the last patch this snapshot
+        // already contains (C1); an older one omits it and the caller falls
+        // back to the seq whose gap triggered the read.
+        return SnapshotRead(
+            RcJson.decodeFromJsonElement(TurnSnapshot.serializer(), element),
+            ((element["seq"] as? JsonPrimitive)?.takeIf { !it.isString })?.content?.toLongOrNull()
+        )
+    }
+
+    /**
+     * The session list is refreshed here — coalesced, never from inside the
+     * collector — and doubles as the gap rule's backstop: a `sessions.changed`
+     * whose row says the open turn is over while the live snapshot still calls
+     * it running is the one place guaranteed to arrive after a re-read that
+     * failed (C1).
+     */
+    private var reloadJob: Job? = null
+
+    private fun onSessionsChanged() {
+        if (reloadJob?.isActive == true) return
+        reloadJob = scope.launch {
+            reloadSessionsOnce()
+            val key = openSessionKey ?: return@launch
+            if (liveTurn.snapshot?.running != true) return@launch
+            val row = _state.value.sessions.firstOrNull { it.key == key } ?: return@launch
+            if (row.runState == "running") return@launch
+            // The row says the open turn is over while the live snapshot still
+            // calls it running (a gap whose re-read failed is the common way
+            // in). The heal is the session record, not another snapshot read:
+            // reopen, and the record's final state replaces the stale one (C1).
+            resyncJob?.cancel()
+            resyncJob = null
+            resyncPendingSeq = null
+            resyncGeneration += 1
+            val opened = runCatching {
+                requestDecoded("sessions.open", buildJsonObject { put("key", key) }, OpenSessionResponse.serializer())
+            }.getOrNull() ?: return@launch
+            liveTurn.setHistory(opened.turns)
+            liveTurn.setSnapshot(opened.live ?: opened.turns.lastOrNull()?.snapshot)
+            _live.value += 1
+        }
+    }
+
+    private suspend fun reloadSessionsOnce() {
+        val rows = requestDecoded("sessions.list", JsonObject(emptyMap()), ListSerializer(SessionRow.serializer())) ?: return
+        update { it.copy(sessions = rows, sessionsLoading = false, sessionsError = null) }
     }
 
     // --- host calls ----------------------------------------------------------------
@@ -709,6 +1048,12 @@ class AppController(
         if (previous != null && previous != key) {
             runCatching { request("unsubscribe", buildJsonObject { put("key", previous) }) }
         }
+        // The in-flight re-read belongs to whichever session it was following:
+        // its answer must not land on this one.
+        resyncJob?.cancel()
+        resyncJob = null
+        resyncPendingSeq = null
+        resyncGeneration += 1
         openSessionKey = key
         liveTurn.reset()
         _live.value += 1
@@ -723,6 +1068,10 @@ class AppController(
 
     suspend fun closeSession() {
         val key = openSessionKey ?: return
+        resyncJob?.cancel()
+        resyncJob = null
+        resyncPendingSeq = null
+        resyncGeneration += 1
         runCatching { request("unsubscribe", buildJsonObject { put("key", key) }) }
         openSessionKey = null
         liveTurn.reset()
@@ -730,7 +1079,7 @@ class AppController(
     }
 
     /**
-     * Send a turn, with whatever attachments are staged.
+     * Send a turn, with whatever attachments are staged *for this session*.
      *
      * `text` keeps the parameter name the wire uses (`sessionKey`) — the one
      * exception to the `key` convention of spec §7, which is easy to get wrong
@@ -738,8 +1087,15 @@ class AppController(
      *
      * The upload ids are only handed over once every one of them is complete:
      * an unfinished id fails the whole turn on the desktop, so it is refused
-     * here with a message naming the file. If the turn itself fails, the ids are
-     * put back so the user can retry without re-uploading.
+     * here with a message naming the file.
+     *
+     * When a prompt fails the uploads go back only if the host *said*, on the
+     * same connection, that it did not take the turn (a definite `ok:false` or
+     * a call error the host produced). Anything else — a drop, a timeout, an
+     * answer that never arrived — leaves it genuinely uncertain whether the
+     * turn started, and the ids it may already have consumed are dead with the
+     * connection regardless (the desktop's stash is per-connection), so the
+     * drafts are dropped and the user is told to check the transcript (S28).
      */
     suspend fun prompt(
         key: String,
@@ -749,11 +1105,12 @@ class AppController(
         approvalMode: String?
     ): PromptResponse {
         val taken = try {
-            uploads.take()
+            uploads.take(key)
         } catch (error: Throwable) {
             if (error is CancellationException) throw error
             return PromptResponse(ok = false, error = error.message ?: "附件还没传完")
         }
+        val connection: Any? = client?.connectionMarker ?: this@AppController
         val ids = taken.map { it.id }
         val body = buildJsonObject {
             put("sessionKey", key)
@@ -763,34 +1120,50 @@ class AppController(
             if (!approvalMode.isNullOrBlank()) put("approvalMode", approvalMode)
             if (ids.isNotEmpty()) putJsonArray("uploads") { ids.forEach { add(JsonPrimitive(it)) } }
         }
-        // The desktop lets go of the uploads only once it accepts the turn
-        // (spec §7), so on any other outcome they are still there under the
-        // same ids and go back on the list: a retry sends the prompt again,
-        // not the bytes. This comment used to say so while the code dropped them.
-        val response = try {
-            requestDecoded("turn.prompt", body, PromptResponse.serializer())
-        } catch (error: Throwable) {
-            if (error is CancellationException) {
+        try {
+            val response = requestDecoded("turn.prompt", body, PromptResponse.serializer())
+            if (response == null) return uncertainPromptError(taken)
+            if (!response.ok) {
+                // The host answered on this connection and refused: the stash
+                // is still holding the ids, and a retry may carry them as-is.
                 uploads.restore(taken)
-                throw error
+                update { it.copy(lastError = response.error) }
             }
+            return response
+        } catch (error: RemoteCallError) {
             uploads.restore(taken)
             return PromptResponse(ok = false, error = error.message ?: "发送失败")
-        } ?: run {
-            uploads.restore(taken)
-            return PromptResponse(ok = false, error = "电脑没有回应")
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            return uncertainPromptError(taken, error)
         }
-        if (!response.ok) {
-            uploads.restore(taken)
-            update { it.copy(lastError = response.error) }
+    }
+
+    /**
+     * No trustworthy answer — a drop, a timeout, an undecodable reply: the
+     * turn may already be running on the desktop, and its upload stash is
+     * per-connection, so the ids either were consumed or died with the wire.
+     * Either way they are NOT put back: replaying them on the next connection
+     * would earn a certain "附件不存在或已过期" (S28). The user is told to check
+     * the transcript instead.
+     */
+    private suspend fun uncertainPromptError(
+        taken: List<UploadManager.Upload>,
+        error: Throwable? = null
+    ): PromptResponse {
+        val message = buildString {
+            append(error?.message ?: "发送状态不明")
+            append("：不确定回合是否已开始，请查看会话记录确认后再决定是否重发")
+            if (taken.isNotEmpty()) append("；附件已移除，需要重新添加")
         }
-        return response
+        update { it.copy(lastError = message) }
+        return PromptResponse(ok = false, error = message)
     }
 
     /** Stage a file for the next turn's prompt. Throws with a message for the UI. */
-    suspend fun attach(name: String, mimeType: String?, bytes: ByteArray): Unit {
+    suspend fun attach(name: String, mimeType: String?, bytes: ByteArray, sessionKey: String? = null): Unit {
         try {
-            uploads.begin(name, mimeType, bytes)
+            uploads.begin(name, mimeType, bytes, sessionKey)
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
@@ -802,9 +1175,19 @@ class AppController(
         uploads.abort(id)
     }
 
-    /** Everything staged, dropped — called when leaving the composer. */
-    suspend fun detachAll() {
-        uploads.abortAll()
+    /** Everything staged for [sessionKey], dropped — called when leaving its composer. */
+    suspend fun detachAll(sessionKey: String) {
+        uploads.abortAll(sessionKey)
+    }
+
+    /** Leaving a session's composer, from a scope that outlives it (S29). */
+    fun detachAllBackground(sessionKey: String) {
+        scope.launch { uploads.abortAll(sessionKey) }
+    }
+
+    /** Leaving the terminal, from a scope that outlives it (S29). */
+    fun closeTerminalBackground(sessionKey: String) {
+        scope.launch { runCatching { closeTerminal(sessionKey) } }
     }
 
     suspend fun stopTurn(key: String) {
@@ -882,7 +1265,7 @@ class AppController(
         cancelSearch()
         val id = "s" + Primitives.randomBytes(8).toHexString()
         val fold = SearchFold(id = id, query = query)
-        _search.value = fold
+        publishSearch(fold)
         val params = buildJsonObject {
             put("id", id)
             put("root", root)
@@ -893,32 +1276,43 @@ class AppController(
             request("search.start", params)
         } catch (error: Throwable) {
             if (error is CancellationException) throw error
-            fold.failed(error.message ?: "搜索失败")
-            _search.value = SearchFold(id, query).also { it.failed(error.message ?: "搜索失败") }
+            // A brand-new fold carrying the failure: mutating the old one and
+            // putting the same instance back emits nothing (StateFlow compares
+            // by identity), which is exactly how results used to never appear.
+            publishSearch(SearchFold(id, query).also { it.failed(error.message ?: "搜索失败") })
         }
         return id
     }
 
     suspend fun cancelSearch() {
-        val fold = _search.value ?: return
+        val fold = _searchView.value?.fold ?: return
         if (fold.state.done) return
         runCatching { request("search.cancel", buildJsonObject { put("id", fold.id) }) }
-        fold.cancelled()
-        _search.value = fold
+        publishSearch(SearchFold(fold.id, fold.query).also { it.cancelled() })
     }
 
     fun clearSearch() {
-        _search.value = null
+        publishSearch(null)
+    }
+
+    /** Leaving the files screen, from a scope that outlives it. */
+    fun cancelSearchBackground() {
+        val fold = _searchView.value?.fold ?: return
+        scope.launch {
+            if (!fold.state.done) runCatching { request("search.cancel", buildJsonObject { put("id", fold.id) }) }
+            publishSearch(null)
+        }
     }
 
     private fun onSearchProgress(payload: JsonElement) {
-        val fold = _search.value ?: return
+        val fold = _searchView.value?.fold ?: return
         val push = try {
             RcJson.decodeFromJsonElement(com.skidsense.mobile.model.SearchProgressPush.serializer(), payload)
         } catch (_: Exception) {
             return
         }
-        if (fold.apply(push)) _search.value = fold
+        // The same mutation StateFlow-filtered before; now the publish forces it.
+        if (fold.apply(push)) publishSearch(fold)
     }
 
     // --- artifacts ------------------------------------------------------------------
@@ -1040,15 +1434,29 @@ class AppController(
 
     // --- persistence -----------------------------------------------------------------
 
-    private fun loadPaired(): List<PairedHost> {
+    /** The pairings one account may see, as stored on disk. */
+    private fun loadPaired(userId: Long, server: String): List<PairedHost> {
         val raw = files.read(PAIRED_KEY) ?: return emptyList()
-        return runCatching {
+        val all = runCatching {
             RcJson.decodeFromString(ListSerializer(PairedHost.serializer()), raw)
         }.getOrElse { emptyList() }
+        return all.filter { it.visibleTo(userId, server) }
     }
 
-    private fun savePaired(hosts: List<PairedHost>) {
-        files.write(PAIRED_KEY, RcJson.encodeToString(ListSerializer(PairedHost.serializer()), hosts))
+    /**
+     * Write [visible] — what the *current* account holds — back, preserving on
+     * disk any pairing the current account cannot see (another account lives on
+     * the same phone). A naive rewrite used to destroy those rows the first
+     * time the short in-memory list was saved after a re-login (S33).
+     */
+    private fun persistPaired(visible: List<PairedHost>) {
+        val userId = _state.value.userId
+        val server = _state.value.baseUrl
+        val raw = files.read(PAIRED_KEY)
+        val others = raw?.let {
+            runCatching { RcJson.decodeFromString(ListSerializer(PairedHost.serializer()), it) }.getOrNull()
+        }.orEmpty().filterNot { it.visibleTo(userId, server) }
+        files.write(PAIRED_KEY, RcJson.encodeToString(ListSerializer(PairedHost.serializer()), visible + others))
     }
 
     private fun update(block: (AppState) -> AppState) {

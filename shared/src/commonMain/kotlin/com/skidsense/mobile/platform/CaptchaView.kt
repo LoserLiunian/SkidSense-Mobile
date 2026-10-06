@@ -26,4 +26,4 @@ const val CAPTCHA_SEND_JS = "function skidsenseSend(value) { window.$CAPTCHA_BRI
  * divergent implementation of somebody else's proof-of-work.
  */
 @Composable
-expect fun CaptchaWebView(html: String, onResult: (String?) -> Unit, modifier: Modifier)
+expect fun CaptchaWebView(html: String, onResult: (String?) -> Unit, modifier: Modifier, baseUrl: String = "https://static.geetest.com/")

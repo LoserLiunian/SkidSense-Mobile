@@ -49,7 +49,10 @@ class UploadTest {
         )
         client.start()
         withTimeout(30_000) { client.state.filterIsInstance<ClientState.Connected>().first() }
-        val uploads = UploadManager { method, params -> client.call(method, params) as? JsonObject }
+        val uploads = UploadManager(
+            { method, params -> client.call(method, params) as? JsonObject },
+            { client.connectionMarker }
+        )
         return Harness(client, host, uploads)
     }
 
@@ -64,7 +67,7 @@ class UploadTest {
         assertEquals(B64u.encode(bytes(1000)), h.host.uploads[upload.id]?.bytes?.toString())
         assertEquals(listOf("upload.begin", "upload.chunk"), h.host.calls.map { it.first })
 
-        val ids = h.uploads.takeIds()
+        val ids = h.uploads.take("claude:1").map { it.id }
         assertEquals(listOf(upload.id), ids)
         assertEquals(0, h.uploads.count, "taking the ids forgets them")
         h.client.stop()
@@ -79,10 +82,10 @@ class UploadTest {
     fun takenUploadsGoBackWhenThePromptIsRefused() = runTest {
         val h = setUp()
         val upload = h.uploads.begin("keep.txt", "text/plain", bytes(10))
-        val taken = h.uploads.take()
+        val taken = h.uploads.take("claude:1")
         assertEquals(0, h.uploads.count)
         h.uploads.restore(taken)
-        assertEquals(listOf(upload.id), h.uploads.takeIds(), "the same id, not a fresh upload")
+        assertEquals(listOf(upload.id), h.uploads.take("claude:1").map { it.id }, "the same id, not a fresh upload")
         assertEquals(listOf("upload.begin", "upload.chunk"), h.host.calls.map { it.first }, "nothing was sent again")
         h.client.stop()
     }
@@ -146,7 +149,7 @@ class UploadTest {
         assertEquals("upload-desync", error.code)
         // The manager holds nothing unfinished: taking ids must not silently
         // hand over a partial upload.
-        assertEquals(emptyList(), h.uploads.takeIds())
+        assertEquals(emptyList(), h.uploads.take("claude:1"))
         h.client.stop()
     }
 
@@ -155,16 +158,19 @@ class UploadTest {
         val h = setUp()
         // A host that reports less received than we sent: `begin` fails and
         // aborts, so nothing stays open to be referenced.
-        val partial = com.skidsense.mobile.app.UploadManager { method, params ->
-            when (method) {
-                "upload.begin" -> buildJsonObject { put("id", "u-partial") }
-                "upload.chunk" -> buildJsonObject { put("received", 1) }
-                else -> buildJsonObject { put("ok", true) }
-            }
-        }
+        val partial = com.skidsense.mobile.app.UploadManager(
+            { method, _ ->
+                when (method) {
+                    "upload.begin" -> buildJsonObject { put("id", "u-partial") }
+                    "upload.chunk" -> buildJsonObject { put("received", 1) }
+                    else -> buildJsonObject { put("ok", true) }
+                }
+            },
+            { null }
+        )
         assertFailsWith<RcException> { partial.begin("partial.bin", null, bytes(100)) }
         assertEquals(0, partial.count)
-        assertEquals(emptyList(), partial.takeIds())
+        assertEquals(emptyList(), partial.take("claude:1"))
         h.client.stop()
     }
 
@@ -181,7 +187,7 @@ class UploadTest {
         // abortAll does the same for everything open.
         h.uploads.begin("y.bin", null, bytes(32))
         h.uploads.begin("z.bin", null, bytes(32))
-        h.uploads.abortAll()
+        h.uploads.abortAll("claude:1")
         assertEquals(0, h.host.uploads.size)
         h.client.stop()
     }
@@ -191,7 +197,7 @@ class UploadTest {
         val h = setUp()
         val first = h.uploads.begin("one.txt", "text/plain", bytes(128))
         val second = h.uploads.begin("two.txt", "text/plain", bytes(Protocol.UPLOAD_CHUNK + 1))
-        val ids = h.uploads.takeIds()
+        val ids = h.uploads.take("claude:1").map { it.id }
         assertEquals(listOf(first.id, second.id), ids)
         val result = h.client.call(
             "turn.prompt",
