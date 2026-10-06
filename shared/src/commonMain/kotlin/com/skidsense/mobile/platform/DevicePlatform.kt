@@ -20,6 +20,15 @@ interface DevicePlatform {
 
     /** A random id for this install, kept so "this device" can be highlighted. */
     fun installId(): String
+
+    /**
+     * Call [onChange] whenever the phone's network changes — Wi-Fi joined or
+     * left, cellular back — so the connection can retry at once instead of
+     * waiting out its backoff, and a relay connection can look for the LAN.
+     * Returns the unsubscribe. A platform that cannot tell does nothing; the
+     * return to the foreground is the fallback.
+     */
+    fun watchNetwork(onChange: () -> Unit): () -> Unit = {}
 }
 
 fun interface BiometricGate {

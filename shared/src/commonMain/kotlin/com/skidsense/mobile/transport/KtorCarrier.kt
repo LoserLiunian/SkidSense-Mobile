@@ -17,6 +17,8 @@ import io.ktor.websocket.readText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 
 /**
@@ -60,7 +62,17 @@ class KtorCarrier(
     }
 
     override suspend fun send(text: String) {
-        session.send(Frame.Text(text))
+        try {
+            session.send(Frame.Text(text))
+        } catch (error: CancellationException) {
+            // A session the far end has already closed — the relay refusing a
+            // device, say — answers a send with a CancellationException,
+            // although nothing cancelled the caller. Passed on as is, the
+            // reconnect loop took it for its own cancellation and stopped.
+            // Only a real cancellation of the caller is passed on.
+            currentCoroutineContext().ensureActive()
+            throw ConnectionClosed(error.message ?: "连接已关闭", error)
+        }
     }
 
     override suspend fun close(reason: String) {
@@ -87,7 +99,11 @@ class KtorCarrierFactory(
             when (route) {
                 is Route.Lan -> client.webSocketSession(lanUrl(route))
                 Route.Relay -> {
-                    val token = bearer() ?: throw CarrierUnavailable("未登录，无法使用中继")
+                    // Null is also what a refresh that could not reach the
+                    // backend gives — a backend restart, a dead network — and
+                    // a real sign-out sends the app back to the login screen
+                    // on its own, so this says only what is known.
+                    val token = bearer() ?: throw CarrierUnavailable("暂时取不到登录凭证（服务器不可达或登录已过期）")
                     val url = relayUrl(target, relayPath()) ?: throw CarrierUnavailable("没有中继地址")
                     client.webSocketSession(url) { header(HttpHeaders.Authorization, "Bearer $token") }
                 }

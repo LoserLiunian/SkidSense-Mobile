@@ -36,6 +36,7 @@ import com.skidsense.mobile.api.ServerStatus
 import com.skidsense.mobile.app.AppController
 import com.skidsense.mobile.platform.CAPTCHA_SEND_JS
 import com.skidsense.mobile.platform.CaptchaWebView
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -57,7 +58,21 @@ fun LoginScreen(app: AppController, onSignedIn: () -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
     var challenge by remember { mutableStateOf<LoginChallenge?>(null) }
 
-    LaunchedEffect(Unit) {
+    // Whether this server wants a captcha is the server's answer, so it is
+    // asked again whenever the address changes — once typing has paused, and
+    // only for something that looks like a whole address. It used to be asked
+    // once, for the default server: pointing the field at another one kept
+    // the first one's captcha (or lack of one).
+    var probedBase by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(base) {
+        if (probedBase != null && probedBase != base) {
+            status = null
+            geetest = null
+            turnstile = null
+        }
+        if (probedBase != null) delay(600)
+        if (!Regex("^https?://[^/\\s]+").containsMatchIn(base)) return@LaunchedEffect
+        probedBase = base
         status = app.probe(base)
     }
 

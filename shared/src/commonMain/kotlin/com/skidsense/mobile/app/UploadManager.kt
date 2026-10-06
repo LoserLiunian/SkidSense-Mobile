@@ -52,10 +52,19 @@ import kotlinx.serialization.json.put
  */
 class UploadManager(
     private val call: suspend (method: String, params: JsonObject) -> JsonObject?,
-    private val connectionMarker: () -> Any?
+    private val connectionMarker: () -> Any?,
+    /**
+     * Raw bytes per `upload.chunk`. The protocol's 384 KiB on the LAN; on the
+     * budgeted relay (§10) a smaller slice, so the phone's other requests are
+     * not queued behind half a megabyte that takes seconds to cross.
+     */
+    private val chunkSize: () -> Int = { Protocol.UPLOAD_CHUNK }
 ) {
     /** How many files may be open at once (the desktop's `MAX_OPEN`). */
     val maxOpen: Int = 8
+
+    /** An upload is still being sent: swapping the connection now would lose it. */
+    val busy: Boolean get() = open.values.any { it.sent < it.size }
 
     private val open = LinkedHashMap<String, Upload>()
 
@@ -148,7 +157,7 @@ class UploadManager(
     private suspend fun sendChunks(upload: Upload) {
         var offset = upload.sent.toInt()
         while (offset < upload.bytes.size) {
-            val end = minOf(offset + Protocol.UPLOAD_CHUNK, upload.bytes.size)
+            val end = minOf(offset + chunkSize().coerceIn(1, Protocol.UPLOAD_CHUNK), upload.bytes.size)
             val slice = upload.bytes.copyOfRange(offset, end)
             val result = call(
                 "upload.chunk",

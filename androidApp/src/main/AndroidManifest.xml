@@ -6,6 +6,11 @@
       and the LAN WebSocket straight to the desktop.
     -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+      To notice a network change (joining Wi-Fi at home) and reconnect — or move
+      from the relay to the LAN — at once instead of after a backoff.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Scanning the pairing QR code on the desktop's screen. -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />

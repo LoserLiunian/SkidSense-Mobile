@@ -134,8 +134,15 @@ fun SessionListScreen(
 fun ConnectionLine(app: AppController) {
     val appState by app.state.collectAsState()
     when (val connection = appState.connection) {
-        is com.skidsense.mobile.transport.ClientState.Connected ->
-            Hint("已连接 · ${connection.route.label}")
+        is com.skidsense.mobile.transport.ClientState.Connected -> {
+            // The relay is budgeted per account (§10): say so, or a slow
+            // transcript over it reads as the app being broken.
+            val budget = appState.relayBytesPerSecond
+            val note = if (connection.route is com.skidsense.mobile.transport.Route.Relay && budget != null) {
+                "（限速 ${(budget + 512) / 1024} KB/s）"
+            } else ""
+            Hint("已连接 · ${connection.route.label}$note")
+        }
         is com.skidsense.mobile.transport.ClientState.Connecting ->
             Hint("正在连接 · ${connection.via}")
         is com.skidsense.mobile.transport.ClientState.Waiting ->

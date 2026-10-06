@@ -78,6 +78,8 @@ class FakeHost(
     var rejectConnectWith: String? = null,
     /** Responses whose JSON is longer than this are sent in parts. */
     var partSize: Int = 512 * 1024,
+    /** Delay between parts: a budgeted relay draining a large response. */
+    var partDelayMs: Long = 0,
     val scopes: List<String> = listOf("sessions", "prompt", "approve", "files", "git"),
     var handler: suspend (method: String, params: JsonElement?) -> JsonElement = { _, _ -> JsonPrimitive(true) }
 ) {
@@ -356,6 +358,7 @@ class FakeHost(
         }
         val chunks = text.chunked(partSize)
         chunks.forEachIndexed { index, chunk ->
+            if (index > 0 && partDelayMs > 0) kotlinx.coroutines.delay(partDelayMs)
             conn.sendInner(buildJsonObject {
                 put("t", "res"); put("id", id); put("part", index); put("parts", chunks.size); put("d", chunk)
             }.toString())

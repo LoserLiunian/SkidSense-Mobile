@@ -9,6 +9,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -88,6 +91,26 @@ fun SessionScreen(
     val snapshot = app.liveTurn.snapshot
     val records = opened?.turns.orEmpty()
     val listState = rememberLazyListState()
+
+    // Follow the end of the transcript, the way a chat does: the newest turn,
+    // and the approval card under it, are what a phone opens a session for.
+    // It used to open at the top of a long session — an approval fifteen
+    // screens down — and sending a message scrolled back to the top. Dragging
+    // up stops following; reaching the bottom again resumes it.
+    var follow by remember(sessionKey) { mutableStateOf(true) }
+    val dragged by listState.interactionSource.collectIsDraggedAsState()
+    LaunchedEffect(listState, dragged) {
+        snapshotFlow { listState.canScrollForward }.collect { more ->
+            if (!more) follow = true else if (dragged) follow = false
+        }
+    }
+    LaunchedEffect(opened, revision, snapshot?.openInteraction?.id, follow) {
+        if (!follow) return@LaunchedEffect
+        val last = listState.layoutInfo.totalItemsCount - 1
+        if (last < 0) return@LaunchedEffect
+        listState.scrollToItem(last)
+        listState.scrollBy(1_000_000f)
+    }
 
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -170,7 +193,16 @@ fun SessionScreen(
             running = snapshot?.running == true,
             rowWorkdir = opened?.row?.workdir.orEmpty(),
             agent = opened?.row?.agent.orEmpty(),
-            onSent = { scope.launch { listState.animateScrollToItem(0) } }
+            onSent = {
+                follow = true
+                scope.launch {
+                    val last = listState.layoutInfo.totalItemsCount - 1
+                    if (last >= 0) {
+                        listState.scrollToItem(last)
+                        listState.scrollBy(1_000_000f)
+                    }
+                }
+            }
         )
     }
 }

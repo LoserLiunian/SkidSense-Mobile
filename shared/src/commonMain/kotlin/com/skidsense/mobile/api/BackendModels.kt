@@ -32,7 +32,15 @@ data class CompanionConfig(
     @SerialName("access_ttl") val accessTtl: Long = 3600,
     @SerialName("enroll_ttl") val enrollTtl: Long = 600,
     @SerialName("ws_path") val wsPath: String? = null,
-    val history: CompanionHistoryConfig? = null
+    val history: CompanionHistoryConfig? = null,
+    val relay: CompanionRelayConfig? = null
+)
+
+/** The relay's own limits (§10, §13). */
+@Serializable
+data class CompanionRelayConfig(
+    /** The per-account budget, both directions together; absent from a backend that predates it. */
+    @SerialName("user_bytes_per_second") val userBytesPerSecond: Long? = null
 )
 
 @Serializable

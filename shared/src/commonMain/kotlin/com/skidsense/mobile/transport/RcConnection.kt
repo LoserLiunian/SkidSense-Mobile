@@ -16,6 +16,8 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.ClosedReceiveChannelException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.isActive
@@ -24,6 +26,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -36,7 +39,10 @@ import kotlin.time.Clock
 /** Tunables, overridable in tests. */
 data class ConnectionConfig(
     val handshakeTimeoutMs: Long = Protocol.HANDSHAKE_TIMEOUT_MS,
+    /** How long a request may go without the line delivering anything at all (see `progress`). */
     val requestTimeoutMs: Long = 30_000,
+    /** However lively the line, a request is given up after this. */
+    val requestCeilingMs: Long = 15 * 60_000,
     /** How often the device pings when the line is quiet. */
     val pingIntervalMs: Long = 25_000,
     /** No frame at all for this long means the line is dead. */
@@ -69,6 +75,16 @@ class RcConnection private constructor(
     private var nextId = 1L
     private val pending = HashMap<String, Pending>()
     private var lastReceivedAt = now()
+    /**
+     * Responses and events received so far. A request's timeout is on
+     * *silence*, not on the whole call: over the budgeted relay a large
+     * response arrives slowly but steadily, and a request queued behind one
+     * is waiting on a line that is plainly working.
+     */
+    private var progress = 0L
+
+    /** Requests still waiting for their answer. */
+    val inFlight: Int get() = pending.size
 
     private val _events = MutableSharedFlow<RcEvent>(extraBufferCapacity = 512)
     val events: SharedFlow<RcEvent> = _events
@@ -116,7 +132,21 @@ class RcConnection private constructor(
         ): RcConnection {
             try {
                 return withTimeout(config.handshakeTimeoutMs) {
-                    carrier.send(OuterFrames.encode(initiator.hs1.toJson()))
+                    try {
+                        carrier.send(OuterFrames.encode(initiator.hs1.toJson()))
+                    } catch (error: ConnectionClosed) {
+                        // The relay refuses (the desktop is offline, say) by
+                        // writing its reason and closing: by the time we send,
+                        // the reason is waiting in the inbox. Saying it beats
+                        // saying "the socket closed".
+                        throw queuedRelayError(carrier, route) ?: error
+                    } catch (error: kotlinx.coroutines.CancellationException) {
+                        // The same refusal from a carrier that reports a closed
+                        // socket as a cancellation (Ktor does). Ours — the
+                        // handshake timeout, a stop — still propagates.
+                        currentCoroutineContext().ensureActive()
+                        throw queuedRelayError(carrier, route) ?: ConnectionClosed(error.message ?: "连接已关闭", error)
+                    }
                     val hs2 = when (val frame = receiveOuter(carrier, route)) {
                         is OuterFrame.Hs2 -> frame.frame
                         is OuterFrame.Reject -> throw HandshakeRejected(
@@ -191,6 +221,14 @@ class RcConnection private constructor(
             return frame
         }
 
+        /** A `relay-error` the relay sent before it closed, if one is waiting (or arrives at once). */
+        private suspend fun queuedRelayError(carrier: Carrier, route: Route): RelayRejected? {
+            if (route !is Route.Relay) return null
+            val text = withTimeoutOrNull(500) { carrier.incoming.receiveCatching().getOrNull() } ?: return null
+            val frame = runCatching { OuterFrames.parse(text) }.getOrNull() as? OuterFrame.RelayError ?: return null
+            return RelayRejected(frame.frame.code, RELAY_MESSAGES[frame.frame.code] ?: "中继拒绝了连接（${frame.frame.code}）")
+        }
+
         internal fun parseInner(text: String): JsonObject = try {
             RcJson.parseToJsonElement(text).jsonObject
         } catch (error: Exception) {
@@ -239,8 +277,9 @@ class RcConnection private constructor(
 
     private suspend fun dispatch(message: JsonObject) {
         when (message.str("t")) {
-            "res" -> onResponse(message)
+            "res" -> { progress += 1; onResponse(message) }
             "ev" -> {
+                progress += 1
                 val kind = message.str("k") ?: return
                 _events.emit(RcEvent(kind, message["p"] ?: JsonObject(emptyMap())))
             }
@@ -378,7 +417,16 @@ class RcConnection private constructor(
         }
         try {
             sendInner(Inner.request(id, method, params))
-            return withTimeout(timeoutMs) { deferred.await() }
+            // Fails after [timeoutMs] in which nothing at all arrived — or at
+            // the hard ceiling, however lively the line.
+            var waited = 0L
+            while (true) {
+                val seen = progress
+                val answer = withTimeoutOrNull(timeoutMs) { deferred.await() }
+                if (answer != null) return answer
+                waited += timeoutMs
+                if (progress == seen || waited >= config.requestCeilingMs) throw RcException("timeout", "请求超时：$method")
+            }
         } catch (error: TimeoutCancellationException) {
             throw RcException("timeout", "请求超时：$method")
         } finally {

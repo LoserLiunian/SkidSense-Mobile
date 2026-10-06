@@ -44,6 +44,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -59,6 +60,13 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
+
+/**
+ * Raw bytes per upload chunk on the budgeted relay: about a second of the
+ * default 100 KB/s once base64'd twice, so nothing else the phone asks for
+ * waits long behind an attachment.
+ */
+internal const val RELAY_UPLOAD_CHUNK = 48 * 1024
 
 /** A paired host as this phone stores it. */
 @kotlinx.serialization.Serializable
@@ -114,7 +122,9 @@ data class AppState(
     val devicesForHost: List<DeviceRow> = emptyList(),
     val biometricLock: Boolean = false,
     val locked: Boolean = false,
-    val lastError: String? = null
+    val lastError: String? = null,
+    /** The relay's per-account budget from `/config`, so the UI can say why the relay is slow. */
+    val relayBytesPerSecond: Long? = null
 ) {
     val connected: Boolean get() = connection is ClientState.Connected
 
@@ -727,7 +737,19 @@ class AppController(
         val rc = RcClient(endpoint, identity, grants, carriers, scope)
         rc.onLanUnreachable = { onLanUnreachable() }
         client = rc
-        uploads = UploadManager(::callOrNull, ::connectionMarker)
+        connectedBefore = false
+        uploads = UploadManager(::callOrNull, ::connectionMarker) {
+            if (client?.route is com.skidsense.mobile.transport.Route.Relay) RELAY_UPLOAD_CHUNK else com.skidsense.mobile.rc.Protocol.UPLOAD_CHUNK
+        }
+        // A half-sent attachment lives in the desktop's per-connection stash;
+        // moving to the LAN mid-upload would lose it.
+        rc.canSwitchRoute = { !uploads.busy }
+        if (_state.value.relayBytesPerSecond == null) {
+            scope.launch {
+                val budget = runCatching { backend.companionConfig() }.getOrNull()?.relay?.userBytesPerSecond
+                if (budget != null && budget > 0) update { it.copy(relayBytesPerSecond = budget) }
+            }
+        }
         publishSearch(null)
         update { it.copy(activeHostId = hostId, connection = ClientState.Idle, welcome = null, sessions = emptyList()) }
         eventJob = scope.launch { rc.state.collect { state -> onConnectionState(state) } }
@@ -742,6 +764,8 @@ class AppController(
         resyncJob = null
         reloadJob?.cancel()
         reloadJob = null
+        healJob?.cancel()
+        healJob = null
         terminalKey = null
         terminalBuffer.clear()
         val rc = client ?: return
@@ -755,6 +779,19 @@ class AppController(
     fun retry() {
         client?.retry()
     }
+
+    /**
+     * The phone's network changed (Wi-Fi joined, cellular back) or the app came
+     * to the foreground: cut a backoff short, and if the connection is on the
+     * relay, look for the desktop on the LAN now rather than in a minute.
+     */
+    fun networkChanged() {
+        client?.retry()
+        client?.probeLan()
+    }
+
+    /** Whether this client has been connected before: the next Connected is a *re*connect. */
+    private var connectedBefore = false
 
     /**
      * A LAN attempt failed and the client is falling back to the relay: ask the
@@ -780,6 +817,14 @@ class AppController(
             uploads.dropStaleConnections()
             if (_state.value.workspaces.isEmpty()) loadWorkspaces()
             loadSessions()
+            // A reconnect: whatever the open turn did while the line was down
+            // was published to nobody. The next patch would show the gap —
+            // but a turn waiting on an answer publishes none, and its question
+            // would never appear. Re-read it now.
+            if (connectedBefore) resyncAfterReconnect()
+            connectedBefore = true
+        } else {
+            endInterruptedSearch()
         }
     }
 
@@ -886,7 +931,23 @@ class AppController(
         scheduleResync(push.seq)
     }
 
-    private fun scheduleResync(triggerSeq: Long) {
+    /**
+     * The session row's `updatedAt` as of the transcript this screen holds —
+     * what a reconnect compares against to tell whether a turn ran meanwhile.
+     */
+    private var historyUpdatedAt = 0L
+
+    /** After a reconnect: re-read the open turn, and the transcript only if something ran. */
+    private fun resyncAfterReconnect() {
+        if (openSessionKey == null) return
+        // A re-read that was in flight belonged to the dead connection.
+        resyncJob?.cancel()
+        resyncJob = null
+        resyncPendingSeq = null
+        scheduleResync(liveTurn.seq, quietIfIdle = true)
+    }
+
+    private fun scheduleResync(triggerSeq: Long, quietIfIdle: Boolean = false) {
         val generation = ++resyncGeneration
         val key = openSessionKey ?: return
         resyncJob = scope.launch {
@@ -907,6 +968,15 @@ class AppController(
                         liveTurn.setSnapshot(fresh.snapshot)
                         liveTurn.acceptSeq(fresh.seq ?: target)
                     } else {
+                        if (quietIfIdle && liveTurn.snapshot?.running != true &&
+                            (_state.value.sessions.firstOrNull { it.key == key }?.updatedAt ?: 0L) <= historyUpdatedAt
+                        ) {
+                            // Nothing was running and nothing ran: the
+                            // transcript this screen holds is current, and over
+                            // the budgeted relay a full re-read is not free.
+                            liveTurn.acceptSeq(target)
+                            return@launch
+                        }
                         // The turn ended before the re-read arrived: the end it
                         // never published lives in the session record, not in
                         // `turn.snapshot`. Finishing from `sessions.open` is
@@ -921,6 +991,7 @@ class AppController(
                             // `sessions.changed` — asks again (C1).
                             return@launch
                         }
+                        historyUpdatedAt = opened.row.updatedAt
                         liveTurn.setHistory(opened.turns)
                         liveTurn.setSnapshot(opened.live ?: opened.turns.lastOrNull()?.snapshot)
                         liveTurn.acceptSeq(target)
@@ -933,7 +1004,11 @@ class AppController(
                     target = again
                 }
             } finally {
-                resyncJob = null
+                // Only its own slot: a cancelled re-read finishes after the one
+                // that replaced it has started, and clearing the field then
+                // left the new one running unseen — patches it should have held
+                // back were applied onto a base it was about to replace.
+                if (resyncJob === currentCoroutineContext()[Job]) resyncJob = null
                 // A gap that arrived while this one ran still needs an answer:
                 // its patches were dropped, not applied.
                 val pending = resyncPendingSeq
@@ -974,26 +1049,66 @@ class AppController(
      * failed (C1).
      */
     private var reloadJob: Job? = null
+    private var reloadSignal = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
 
+    /**
+     * `sessions.changed`, coalesced but never dropped. A signal that arrives
+     * while a reload is in flight used to be thrown away, and the list kept
+     * whatever that reload read — from before the change. A conflated channel
+     * keeps exactly one more reload owed instead.
+     */
     private fun onSessionsChanged() {
-        if (reloadJob?.isActive == true) return
-        reloadJob = scope.launch {
-            reloadSessionsOnce()
-            val key = openSessionKey ?: return@launch
-            if (liveTurn.snapshot?.running != true) return@launch
-            val row = _state.value.sessions.firstOrNull { it.key == key } ?: return@launch
-            if (row.runState == "running") return@launch
-            // The row says the open turn is over while the live snapshot still
-            // calls it running (a gap whose re-read failed is the common way
-            // in). The heal is the session record, not another snapshot read:
-            // reopen, and the record's final state replaces the stale one (C1).
-            resyncJob?.cancel()
-            resyncJob = null
-            resyncPendingSeq = null
-            resyncGeneration += 1
+        if (reloadJob?.isActive != true) {
+            val signal = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
+            reloadSignal = signal
+            reloadJob = scope.launch {
+                for (tick in signal) {
+                    try {
+                        reloadSessionsOnce()
+                        healIfStale()
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Throwable) {
+                        // Offline mid-reload: the next change or reconnect asks again.
+                    }
+                }
+            }
+        }
+        reloadSignal.trySend(Unit)
+    }
+
+    /**
+     * The row says the open turn is over while the live view still runs it (a
+     * gap whose re-read failed is the usual way in) — the gap rule's backstop
+     * (C1): the session record has the turn's end, so it is read from there.
+     *
+     * Patches keep applying while that read is out, and its answer is used
+     * only if none did: an answer computed before the turn's last patch, but
+     * delivered after it, used to be painted over that patch — a phone left
+     * showing a finished turn as running, for good. When patches did arrive
+     * and the turn still looks live, the row and the stream disagree, and the
+     * turn is re-read the way a gap is (`turn.snapshot`, which carries a seq).
+     */
+    private var healJob: Job? = null
+
+    private fun healIfStale() {
+        val key = openSessionKey ?: return
+        if (liveTurn.snapshot?.running != true) return
+        val row = _state.value.sessions.firstOrNull { it.key == key } ?: return
+        if (row.runState == "running") return
+        if (resyncJob?.isActive == true || healJob?.isActive == true) return
+        val generation = resyncGeneration
+        val before = liveTurn.revision
+        healJob = scope.launch {
             val opened = runCatching {
                 requestDecoded("sessions.open", buildJsonObject { put("key", key) }, OpenSessionResponse.serializer())
             }.getOrNull() ?: return@launch
+            if (openSessionKey != key || generation != resyncGeneration) return@launch
+            if (liveTurn.revision != before) {
+                if (liveTurn.snapshot?.running == true && resyncJob?.isActive != true) scheduleResync(liveTurn.seq)
+                return@launch
+            }
+            historyUpdatedAt = opened.row.updatedAt
             liveTurn.setHistory(opened.turns)
             liveTurn.setSnapshot(opened.live ?: opened.turns.lastOrNull()?.snapshot)
             _live.value += 1
@@ -1095,6 +1210,7 @@ class AppController(
         val response = requestDecoded("sessions.open", buildJsonObject { put("key", key) }, OpenSessionResponse.serializer())
         if (response == null) return null
         client?.subscribe(key)
+        historyUpdatedAt = response.row.updatedAt
         liveTurn.setHistory(response.turns)
         liveTurn.setSnapshot(response.live)
         _live.value += 1
@@ -1337,6 +1453,17 @@ class AppController(
             if (!fold.state.done) runCatching { request("search.cancel", buildJsonObject { put("id", fold.id) }) }
             publishSearch(null)
         }
+    }
+
+    /**
+     * The desktop cancels a device's searches when its connection ends, and
+     * the `done` it would have sent goes nowhere: the search box spun for ever.
+     */
+    private fun endInterruptedSearch() {
+        val fold = _searchView.value?.fold ?: return
+        if (fold.state.done) return
+        fold.failed("连接中断，搜索已停止，请重新搜索")
+        publishSearch(fold)
     }
 
     private fun onSearchProgress(payload: JsonElement) {

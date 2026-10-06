@@ -1,6 +1,8 @@
 package com.skidsense.mobile.platform
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.runtime.Composable
@@ -19,6 +21,25 @@ class AndroidDevicePlatform(private val context: Context) : DevicePlatform {
     override val name: String = "android"
     override val model: String = "${Build.MANUFACTURER} ${Build.MODEL}".trim()
     override fun installId(): String = files.read("install-id") ?: UUID.randomUUID().toString().also { files.write("install-id", it) }
+
+    /**
+     * The *default* network: what new sockets will use. Its arrival is the
+     * moment a Wi-Fi join (or cellular coming back) can be acted on; the
+     * callback for the first one fires on registration, which is harmless.
+     */
+    override fun watchNetwork(onChange: () -> Unit): () -> Unit {
+        val manager = context.getSystemService(ConnectivityManager::class.java) ?: return {}
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) { onChange() }
+            override fun onLost(network: Network) { onChange() }
+        }
+        try {
+            manager.registerDefaultNetworkCallback(callback)
+        } catch (_: SecurityException) {
+            return {}
+        }
+        return { runCatching { manager.unregisterNetworkCallback(callback) } }
+    }
 }
 
 @Composable

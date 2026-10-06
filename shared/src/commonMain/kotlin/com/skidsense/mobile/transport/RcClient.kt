@@ -16,6 +16,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -41,9 +46,18 @@ class HostEndpoint(
     val hostKey: ByteArray,
     val deviceId: String,
     lanAddrs: List<String>,
-    val lanPort: Int,
+    lanPort: Int,
     val relayEnabled: Boolean = true
 ) {
+    /**
+     * The desktop's LAN port. Learned like the addresses: a desktop that found
+     * its usual port taken listens on another and registers it, and a phone
+     * that kept the port from the QR code for the life of the process could
+     * only reach it through the relay until the app was restarted.
+     */
+    var lanPort: Int = lanPort
+        private set
+
     private var current: List<String> = lanAddrs
 
     /** Addresses we have seen for this host, newest first: what to try right now. */
@@ -68,6 +82,7 @@ class HostEndpoint(
         val incoming = addrs.filter { it.isNotBlank() }.distinct()
         if (incoming.isEmpty() && (port == null || port == lanPort)) return false
         val changed = incoming != current || (port != null && port != lanPort)
+        if (port != null && port in 1..65535) lanPort = port
         if (incoming.isNotEmpty()) {
             current = incoming
             for (address in incoming.asReversed()) {
@@ -105,6 +120,15 @@ data class ClientConfig(
     val backoffMaxMs: Long = 30_000,
     /** How long a call waits for a connection before failing. */
     val callWaitMs: Long = 15_000,
+    /**
+     * How long the LAN routes get on their own before the relay is tried as
+     * well. The LAN addresses are all tried at once (one LAN timeout for the
+     * lot, not one each); a desktop that answers on the LAN does so in well
+     * under this, so a phone at home never opens a relay connection.
+     */
+    val relayHeadStartMs: Long = 700,
+    /** While on the relay, how often to look for the desktop on the LAN again. */
+    val lanProbeIntervalMs: Long = 60_000,
     val connection: ConnectionConfig = ConnectionConfig()
 )
 
@@ -151,8 +175,20 @@ class RcClient(
     private var subscribedOnCurrent = mutableSetOf<String>()
     private val subscriptionLock = Mutex()
     private val wake = Channel<Unit>(Channel.CONFLATED)
+    private val lanProbe = Channel<Unit>(Channel.CONFLATED)
     private var loop: Job? = null
     private var current: RcConnection? = null
+    /** The route the last connection came up on: a relay success starts the relay at once next time. */
+    private var lastGood: Route? = null
+    /** Set while a relay connection is being swapped for a LAN one, so the drop is not reported. */
+    private var switching = false
+
+    /**
+     * Whether the connection may be swapped for a LAN one right now. The
+     * caller knows what would not survive it — an attachment half uploaded
+     * lives in the desktop's per-connection stash.
+     */
+    var canSwitchRoute: () -> Boolean = { true }
 
     val hostId: String get() = endpoint.hostId
 
@@ -165,6 +201,11 @@ class RcClient(
     fun retry() {
         start()
         wake.trySend(Unit)
+    }
+
+    /** Look for the desktop on the LAN now rather than at the next interval (network changed). */
+    fun probeLan() {
+        lanProbe.trySend(Unit)
     }
 
     suspend fun stop() {
@@ -180,7 +221,18 @@ class RcClient(
         var freshGrant = false
         while (true) {
             attempt += 1
-            when (val outcome = connectOnce(attempt, freshGrant)) {
+            val outcome = try {
+                connectOnce(attempt, freshGrant)
+            } catch (error: CancellationException) {
+                // Ktor reports a socket the far end already closed as a
+                // CancellationException. Only this loop's own cancellation may
+                // end it: taking a foreign one for it is how a phone that met
+                // the relay while the desktop was offline stopped reconnecting
+                // for good.
+                currentCoroutineContext().ensureActive()
+                Outcome.Retry(error.message ?: "连接失败", freshGrant = false)
+            }
+            when (outcome) {
                 is Outcome.Up -> {
                     attempt = 0
                     freshGrant = false
@@ -191,11 +243,21 @@ class RcClient(
                     // that reacts to Connected and immediately asks for a
                     // transcript must not be able to race the subscription.
                     resubscribe(connection)
+                    lastGood = connection.route
                     _state.value = ClientState.Connected(connection.welcome, connection.route)
+                    val probe = if (connection.route is Route.Relay) scope.launch { watchForLan(connection) } else null
 
                     val why = connection.closed.await()
+                    probe?.cancel()
                     forward.cancel()
                     current = null
+                    if (switching) {
+                        // Our own swap to the LAN: straight into the next
+                        // round, which tries the LAN first.
+                        switching = false
+                        attempt = 0
+                        continue
+                    }
                     // A relay refusal that arrives *after* the handshake is the
                     // relay's own `relay-error` frame, which only the relay route
                     // tolerates (anything else closes as a violation). As the
@@ -266,27 +328,27 @@ class RcClient(
         var reached = false
         fun unreachable(message: String) { if (!reached) lastError = message }
         fun refused(message: String) { reached = true; lastError = message }
-        for (route in routes) {
-            _state.value = ClientState.Connecting(route.label, attempt)
-            val timeout = if (route is Route.Lan) config.lanConnectTimeoutMs else config.relayConnectTimeoutMs
-            val carrier = try {
-                withTimeout(timeout) { carriers.open(route, CarrierTarget(endpoint.hostId, endpoint.deviceId)) }
-            } catch (error: CancellationException) {
-                if (error is TimeoutCancellationException) {
-                    unreachable("${route.label}：连接超时")
-                    continue
-                }
-                throw error
-            } catch (error: Throwable) {
-                unreachable("${route.label}：${error.message ?: "无法连接"}")
-                continue
-            }
+        // Routes that failed this round — to open, or after opening — are not
+        // raced again in it.
+        val dead = mutableSetOf<Route>()
+        var anyLanOpened = false
+        while (true) {
+            val remaining = routes.filterNot { it in dead }
+            if (remaining.isEmpty()) break
+            val opened = openFastest(remaining, attempt) { route, message ->
+                dead += route
+                unreachable("${route.label}：$message")
+            } ?: break
+            val route = opened.route
+            if (route is Route.Lan) anyLanOpened = true
+            dead += route
             try {
                 val initiator = Initiator(HandshakeMode.CONNECT, endpoint.hostId, endpoint.hostKey, identity)
-                val connection = RcConnection.establish(carrier, route, initiator, grant, null, config.connection, scope)
+                val connection = RcConnection.establish(opened.carrier, route, initiator, grant, null, config.connection, scope)
                 return Outcome.Up(connection)
             } catch (error: CancellationException) {
-                throw error
+                currentCoroutineContext().ensureActive()
+                unreachable("${route.label}：${error.message ?: "连接失败"}")
             } catch (error: HandshakeClosed) {
                 // The carrier died before the welcome, or something plaintext
                 // arrived after the host proved itself: this route is dead,
@@ -319,10 +381,140 @@ class RcClient(
                 unreachable("${route.label}：${error.message ?: "连接失败"}")
             }
         }
-        if (routes.any { it is Route.Lan } && !reached) {
+        if (routes.any { it is Route.Lan } && !anyLanOpened && !reached) {
             runCatching { onLanUnreachable?.invoke() }
         }
         return Outcome.Retry(lastError, freshGrant = false)
+    }
+
+    private sealed interface Opening {
+        class Opened(val route: Route, val carrier: Carrier) : Opening
+        class Failed(val route: Route, val message: String) : Opening
+        data object RelayTurn : Opening
+    }
+
+    /**
+     * Open the first carrier any of [routes] can give.
+     *
+     * The LAN addresses are tried all at once — a desktop advertises every
+     * private address it has (VPN, VM bridges, IPv6) and trying them in turn,
+     * a timeout each, put ten or twenty seconds in front of the relay on every
+     * connect away from home. The relay joins after a head start, or at once
+     * when it is what worked last time (the phone is likely still away), or as
+     * soon as every LAN address has failed. The first carrier to open wins;
+     * the others are cancelled, and one that opens late is closed.
+     */
+    private suspend fun openFastest(routes: List<Route>, attempt: Int, failed: (Route, String) -> Unit): Opening.Opened? = coroutineScope {
+        val lan = routes.filterIsInstance<Route.Lan>()
+        val relay = routes.firstOrNull { it is Route.Relay }
+        val outcomes = Channel<Opening>(Channel.UNLIMITED)
+        val children = mutableListOf<Job>()
+        var running = 0
+        var relayStarted = false
+
+        fun open(route: Route) {
+            running += 1
+            _state.value = ClientState.Connecting(route.label, attempt)
+            children += launch {
+                val timeout = if (route is Route.Lan) config.lanConnectTimeoutMs else config.relayConnectTimeoutMs
+                val result = try {
+                    val carrier = withTimeout(timeout) { carriers.open(route, CarrierTarget(endpoint.hostId, endpoint.deviceId)) }
+                    Opening.Opened(route, carrier)
+                } catch (error: TimeoutCancellationException) {
+                    Opening.Failed(route, "连接超时")
+                } catch (error: CancellationException) {
+                    if (!isActive) throw error
+                    Opening.Failed(route, error.message ?: "无法连接")
+                } catch (error: Throwable) {
+                    Opening.Failed(route, error.message ?: "无法连接")
+                }
+                if (outcomes.trySend(result).isFailure && result is Opening.Opened) result.carrier.close("superseded")
+            }
+        }
+        fun openRelay() {
+            if (relay == null || relayStarted) return
+            relayStarted = true
+            open(relay)
+        }
+
+        lan.forEach { open(it) }
+        val relayFirst = lan.isEmpty() || lastGood is Route.Relay
+        if (relayFirst) openRelay()
+        val timer = if (!relayStarted && relay != null) launch {
+            delay(config.relayHeadStartMs)
+            outcomes.trySend(Opening.RelayTurn)
+        } else null
+
+        var winner: Opening.Opened? = null
+        while (winner == null && (running > 0 || (relay != null && !relayStarted))) {
+            when (val next = outcomes.receive()) {
+                is Opening.Opened -> { running -= 1; winner = next }
+                is Opening.Failed -> {
+                    running -= 1
+                    failed(next.route, next.message)
+                    if (running == 0) openRelay()
+                }
+                Opening.RelayTurn -> openRelay()
+            }
+        }
+        timer?.cancel()
+        children.forEach { it.cancel() }
+        outcomes.close()
+        // Carriers that opened before the channel closed but after the winner.
+        while (true) {
+            val late = outcomes.tryReceive().getOrNull() ?: break
+            if (late is Opening.Opened && late !== winner) late.carrier.close("superseded")
+        }
+        winner
+    }
+
+    /**
+     * On the relay: look for the desktop on the LAN every so often, and move
+     * there when it answers and nothing would be lost by the swap. The relay
+     * is budgeted (§10) and a round trip through it is slower; a phone that
+     * came home used to stay on it until something else dropped the line.
+     */
+    private suspend fun watchForLan(connection: RcConnection) {
+        while (currentCoroutineContext().isActive && current === connection && connection.isOpen) {
+            withTimeoutOrNull(config.lanProbeIntervalMs) { lanProbe.receive() }
+            val lan = endpoint.routes().filterIsInstance<Route.Lan>()
+            if (lan.isEmpty() || current !== connection || !connection.isOpen) continue
+            // Each probe has its own timeout, so the scope always ends here
+            // and drains: a carrier that opens as the probe gives up is closed,
+            // not left open on the desktop's listener.
+            val found = coroutineScope {
+                val hit = Channel<Carrier>(Channel.UNLIMITED)
+                val jobs = lan.map { route ->
+                    launch {
+                        val carrier = withTimeoutOrNull(config.lanConnectTimeoutMs) {
+                            runCatching { carriers.open(route, CarrierTarget(endpoint.hostId, endpoint.deviceId)) }.getOrNull()
+                        }
+                        if (carrier != null && hit.trySend(carrier).isFailure) carrier.close("probe")
+                    }
+                }
+                val first = firstCarrier(jobs, hit)
+                jobs.forEach { it.cancel() }
+                hit.close()
+                while (true) { (hit.tryReceive().getOrNull() ?: break).close("probe") }
+                first?.close("probe")
+                first != null
+            }
+            if (found && current === connection && connection.inFlight == 0 && canSwitchRoute()) {
+                switching = true
+                lastGood = null
+                connection.close("切换到局域网")
+                return
+            }
+        }
+    }
+
+    /** The first carrier [hit] delivers, or null once every probe in [jobs] has finished without one. */
+    private suspend fun firstCarrier(jobs: List<Job>, hit: Channel<Carrier>): Carrier? {
+        while (true) {
+            hit.tryReceive().getOrNull()?.let { return it }
+            if (jobs.all { it.isCompleted }) return hit.tryReceive().getOrNull()
+            delay(20)
+        }
     }
 
     /**
@@ -383,6 +575,9 @@ class RcClient(
     }
 
     val welcome: Welcome? get() = (state.value as? ClientState.Connected)?.welcome
+
+    /** The route the connection is up on, or null when it is not. */
+    val route: Route? get() = (state.value as? ClientState.Connected)?.route
 
     /**
      * An identity token for the connection currently up, or null. Attachments

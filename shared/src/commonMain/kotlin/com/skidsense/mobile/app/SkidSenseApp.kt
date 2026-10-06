@@ -1,6 +1,14 @@
 package com.skidsense.mobile.app
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -143,82 +151,111 @@ fun SkidSenseApp(
     }
 
     // Coming back to a paired host after being backgrounded is the common case:
-    // reconnect when the app returns to the foreground.
+    // the socket may have died with the process asleep, and the backoff may be
+    // half a minute long. Retry at once — and from the relay, look for the LAN.
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { controller.networkChanged() }
+    DisposableEffect(platform) {
+        val stop = platform.watchNetwork { controller.networkChanged() }
+        onDispose { stop() }
+    }
     DisposableEffect(Unit) { onDispose { controller.disconnect() } }
 
-    if (state.locked) {
-        AppLockedScreen(onUnlock = { biometrics.authenticate("解锁 SkidSense") { ok -> if (ok) controller.unlock() } })
-        return
-    }
-
-    when (val current = screen) {
-        Screen.Login -> LoginScreen(controller) { if (deepLink == null) screen = Screen.Hosts }
-        Screen.Hosts -> HostListScreen(
-            app = controller,
-            onOpenHost = { hostId ->
-                controller.connect(hostId)
-                screen = Screen.Sessions
-            },
-            onPair = { go(Screen.Pairing) },
-            onSettings = { go(Screen.Settings) }
-        )
-        Screen.Pairing -> PairingScreen(
-            app = controller,
-            initialLink = launchLink,
-            onPaired = { hostId ->
-                controller.connect(hostId)
-                stack = emptyList()
-                screen = Screen.Sessions
-            },
-            onBack = { screen = Screen.Hosts }
-        )
-        Screen.Sessions -> SessionListScreen(
-            app = controller,
-            onOpen = { key -> go(Screen.Session(key)) },
-            onOpenFiles = { root -> go(Screen.Files(root)) },
-            onOpenGit = { root -> go(Screen.Git(root)) },
-            onBack = {
-                controller.disconnect()
-                screen = Screen.Hosts
-            }
-        )
-        Screen.Settings -> SettingsScreen(
-            app = controller,
-            onBack = { back() },
-            onLogout = {
-                scope.launch {
-                    controller.logout()
-                    stack = emptyList()
-                    screen = Screen.Login
-                }
-            },
-            onHistory = { go(Screen.History) },
-            onBiometric = { controller.setBiometricLock(!state.biometricLock) }
-        )
-        is Screen.History -> HistoryScreen(
-            app = controller,
-            repository = state.activeHost?.let { host ->
-                HistoryRepository(
-                    backend = backend,
-                    identity = controller.identity,
-                    hostId = host.hostId
+    AppFrame {
+        if (state.locked) {
+            AppLockedScreen(onUnlock = { biometrics.authenticate("解锁 SkidSense") { ok -> if (ok) controller.unlock() } })
+        } else {
+            when (val current = screen) {
+                Screen.Login -> LoginScreen(controller) { if (deepLink == null) screen = Screen.Hosts }
+                Screen.Hosts -> HostListScreen(
+                    app = controller,
+                    onOpenHost = { hostId ->
+                        controller.connect(hostId)
+                        screen = Screen.Sessions
+                    },
+                    onPair = { go(Screen.Pairing) },
+                    onSettings = { go(Screen.Settings) }
                 )
-            },
-            onBack = { back() }
-        )
-        is Screen.Session -> SessionScreen(
-            app = controller,
-            sessionKey = current.key,
-            onBack = {
-                scope.launch { controller.closeSession() }
-                back()
-            },
-            onOpenFiles = { root -> go(Screen.Files(root)) },
-            onOpenGit = { root -> go(Screen.Git(root)) },
-            onOpenTerminal = { key -> go(Screen.Terminal(key)) }
-        )
-        is Screen.Files -> FilesScreen(app = controller, root = current.root, onBack = { back() })
-        is Screen.Git -> GitScreen(app = controller, root = current.root, onBack = { back() })
-        is Screen.Terminal -> TerminalScreen(app = controller, sessionKey = current.key, onBack = { back() })
+                Screen.Pairing -> PairingScreen(
+                    app = controller,
+                    initialLink = launchLink,
+                    onPaired = { hostId ->
+                        controller.connect(hostId)
+                        stack = emptyList()
+                        screen = Screen.Sessions
+                    },
+                    onBack = { screen = Screen.Hosts }
+                )
+                Screen.Sessions -> SessionListScreen(
+                    app = controller,
+                    onOpen = { key -> go(Screen.Session(key)) },
+                    onOpenFiles = { root -> go(Screen.Files(root)) },
+                    onOpenGit = { root -> go(Screen.Git(root)) },
+                    onBack = {
+                        controller.disconnect()
+                        screen = Screen.Hosts
+                    }
+                )
+                Screen.Settings -> SettingsScreen(
+                    app = controller,
+                    onBack = { back() },
+                    onLogout = {
+                        scope.launch {
+                            controller.logout()
+                            stack = emptyList()
+                            screen = Screen.Login
+                        }
+                    },
+                    onHistory = { go(Screen.History) },
+                    onBiometric = { controller.setBiometricLock(!state.biometricLock) }
+                )
+                is Screen.History -> HistoryScreen(
+                    app = controller,
+                    repository = state.activeHost?.let { host ->
+                        HistoryRepository(
+                            backend = backend,
+                            identity = controller.identity,
+                            hostId = host.hostId
+                        )
+                    },
+                    onBack = { back() }
+                )
+                is Screen.Session -> SessionScreen(
+                    app = controller,
+                    sessionKey = current.key,
+                    onBack = {
+                        scope.launch { controller.closeSession() }
+                        back()
+                    },
+                    onOpenFiles = { root -> go(Screen.Files(root)) },
+                    onOpenGit = { root -> go(Screen.Git(root)) },
+                    onOpenTerminal = { key -> go(Screen.Terminal(key)) }
+                )
+                is Screen.Files -> FilesScreen(app = controller, root = current.root, onBack = { back() })
+                is Screen.Git -> GitScreen(app = controller, root = current.root, onBack = { back() })
+                is Screen.Terminal -> TerminalScreen(app = controller, sessionKey = current.key, onBack = { back() })
+            }
+        }
+    }
+}
+
+/**
+ * The window every screen draws in: the theme's background and content
+ * colour, kept clear of the status bar, the navigation bar and the keyboard.
+ *
+ * The activity draws edge to edge with a transparent window, and nothing used
+ * to paint behind the screens or tell the text what colour it sat on: the
+ * window showed black, and every Text without an explicit colour — the
+ * transcript itself — was black on it, in either theme. Nor was anything kept
+ * clear of the system bars, so the keyboard covered the composer and its send
+ * button, and the status bar sat over the top of every screen.
+ */
+@Composable
+private fun AppFrame(content: @Composable () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background,
+        contentColor = MaterialTheme.colorScheme.onSurface
+    ) {
+        Box(Modifier.fillMaxSize().safeDrawingPadding()) { content() }
     }
 }
